@@ -56,7 +56,8 @@ src/server/                  HTTP layer                                         
   app.js  http.js  security.js  static.js  auth.js  generation.js  ai-service.js  routes/*.js
 public/                      frontend (static)
   index.html  favicon.svg  css/base.css   js/app.js  js/lib/{dom,api,router,ui}.js          [lead, DONE]
-  js/lib/{markdown,charts,voice}.js  js/views/*.js  js/components/*.js  css/<view>.css      [frontend agents]
+  js/lib/markdown.js (safe markdown-lite → DOM, DONE, shared)                                  [lead, DONE]
+  js/lib/{charts,voice}.js  js/views/*.js  js/components/*.js  css/<view>.css                  [frontend agents]
 test/mocks/                  mock LLM servers (OpenAI-compatible, Gemini, Ollama bits)       [providers agent]
 test/{providers,db,journal,server}/*.test.js     unit + integration (node:test)
 test/e2e/*.e2e.js            browser tests (Playwright, optional)
@@ -336,6 +337,20 @@ computeOverview({ entries, today, days }) -> overview (see §6)   // entries = m
 computeStreaks(dates, today) -> { current, longest, lastEntryDate }
 ```
 
+**Task marker (contract)**: the *system* message of every model call produced by `context.js` starts with a first line
+`TASK: reply` | `TASK: wrapup` | `TASK: meta` | `TASK: memory` | `TASK: weekly`. It costs ~3 tokens, helps debugging, and
+lets the mock LLM servers answer each task in the right format deterministically.
+
+**Label formats (contract, used by the parsers and by the mocks)**
+* `meta` → the model is asked for exactly four lines: `Title: …` / `Summary: …` / `Emotions: a, b, c` / `Tags: x, y`.
+* `memory` → bullet lines `- fact`, or the single word `none`.
+* `weekly` → plain paragraphs, optional `**Bold**` lead-ins and `- ` bullets (rendered by the client's markdown-lite).
+* `reply` / `wrapup` → plain prose (markdown-lite allowed: `**bold**`, `*italic*`, `- ` bullets, blank-line paragraphs).
+
+**Templates**: ids (fixed) — `rose-thorn-bud`, `gratitude`, `morning-intention`, `evening-reflection`, `thought-record`,
+`worry-dump`, `self-compassion`, `goals-checkin`, `relationship-reflection`, `dream-journal`, `weekly-review`, `decision-helper`.
+`icon` must be one of `ICON_NAMES` exported by `public/js/lib/ui.js` (the unit test imports it to enforce this).
+
 **Prompt design rules** (these matter for 1B–3B models): system prompt ≤ ~350 tokens; imperative bullet rules;
 exactly one question per reply; 2–4 sentences; reply in the user's language; no lists unless asked; never
 diagnose; one task per call; metadata/memory calls use *labelled plain-text lines*, never JSON; temperature for
@@ -372,6 +387,8 @@ A caller abort throws the standard `AbortError` (`err.name === 'AbortError'`), *
 Messages must be actionable and must **never** contain the API key.
 
 ### Shared HTTP behaviour
+Node's global `fetch` ignores `HTTPS_PROXY` unless the process runs with `NODE_USE_ENV_PROXY=1` (Node ≥ 22.21). We do not
+re-implement proxying; docs tell users behind a corporate proxy to set it. (In this dev sandbox every live probe needs it.)
 First-byte timeout = `timeoutMs`; idle timeout between chunks = 60 s; both produce `timeout` (hint: for local
 models the first request loads the model, try again). Network failure → `network` with a hint naming the URL
 that was tried (and, for `local`, "is Ollama running? `ollama serve`"). At most **one** automatic retry for
@@ -419,7 +436,7 @@ transient `429` with `retryAfterMs ≤ 8000` and for `503`; never retry after an
   ("Gemini declined to answer this one — journaling about hard things can trip safety filters; rephrase or switch provider").
   `MAX_TOKENS` with no text → `empty` (hint: thinking consumed the budget).
 * Errors arrive as `{ error: { code, status, message, details: [{ '@type': '…ErrorInfo', reason }, { '@type': '…RetryInfo', retryDelay: '12s' }] } }`.
-  Mapping — **invalid key is HTTP 400 with `reason: API_KEY_INVALID`** (verified live) → `auth`; `UNAUTHENTICATED`/`PERMISSION_DENIED` → `auth`;
+  Mapping — **invalid key is HTTP 400 with `reason: API_KEY_INVALID`** and **a missing key is HTTP 403 `PERMISSION_DENIED` "Method doesn't allow unregistered callers"** (both verified live; both → `auth`, the second with hint "no API key was sent"). Header `x-goog-api-key` is confirmed to be honoured; `UNAUTHENTICATED`/`PERMISSION_DENIED` → `auth`;
   `RESOURCE_EXHAUSTED`/429 → `rate_limit` (parse `retryDelay`; message containing `per day`/`quota exceeded` for daily → `quota`);
   `NOT_FOUND` → `model_not_found` (hint: open Settings → *Load models*); `FAILED_PRECONDITION` with "location" → `region`;
   `UNAVAILABLE`/503 → `overloaded`; other 400 → `bad_request` with Google's message.
@@ -490,8 +507,18 @@ are **always sanitised** into a safe FTS5 expression (quote every token) — raw
 * `public/js/lib/router.js` + `public/js/app.js` — hash router; each view is `export default async function view(ctx)` returning an optional cleanup function.
   `ctx = { root, params, query (URLSearchParams), signal (aborts on navigation), app }`.
   `app = { settings, refreshSettings(), saveSettings(patch), navigate(path), toast(msg, opts), on(event, fn), catalog() }`.
-* `public/js/lib/ui.js` — `toast`, `confirmDialog`, `openModal`, `icon(name, {size})`, `spinner`, `emptyState`, `MOODS`, `moodFace`, `debounce`, `autosize`, `formatDate`, `formatTime`, `relativeTime`, `copyText`, `todayString`.
+* `public/js/lib/markdown.js` — `renderMarkdown(text) -> DocumentFragment`, `renderInline(text) -> Node[]`, pure `parseMarkdown/parseInline` (no HTML ever; links become plain text). Use it for every AI-authored text.
+* `public/js/lib/ui.js` — `moodPicker`, `skeleton`, `showError`, `addDays`, `parseDate`, `formatMonth`, `greeting`, `ICON_NAMES`, plus `toast`, `confirmDialog`, `openModal`, `icon(name, {size})`, `spinner`, `emptyState`, `MOODS`, `moodFace`, `debounce`, `autosize`, `formatDate`, `formatTime`, `relativeTime`, `copyText`, `todayString`.
 * `public/css/base.css` — design tokens (light/dark), reset, layout shell, buttons, forms, cards, chips, dialog, toast, skeleton.
+
+### Frontend file ownership details
+Two frontend agents work in parallel. **Frontend-A** owns `views/{today,entry,history}.js`, `css/{today,entry,history}.css`,
+`lib/voice.js`. **Frontend-B** owns `views/{settings,insights,memory,onboarding,login}.js`,
+`css/{settings,insights,memory,onboarding,login}.css`, `lib/charts.js`. Shared components go in `js/components/` and are named
+`<owner-view>-<thing>.js` (e.g. `entry-message.js`, `settings-provider-form.js`); never import another agent's view or component —
+if you need something shared, put it in your own file. Views may import `lib/*.js` freely (including the other agent's lib files
+*after* they exist; if unsure, copy the 5 lines you need). Pure logic (markdown parsing, chart math) lives in functions that take
+plain data so it can be unit-tested in Node (`test/frontend/*.test.js`; modules must not touch `document` at import time).
 
 ### Routes
 `#/` Today · `#/welcome` onboarding · `#/entry/:id` (`?reply=1` auto-requests an AI reply for a trailing user message) · `#/history` ·
