@@ -1,0 +1,22 @@
+{
+  "name": "myjournal",
+  "version": "0.1.0",
+  "description": "A private, AI-guided journal. Bring your own model: OpenAI-compatible API, free Gemini API, or a small self-hosted LLM (Ollama / llama.cpp / LM Studio).",
+  "type": "module",
+  "private": true,
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "dev": "node --watch --disable-warning=ExperimentalWarning server.js",
+    "demo": "node --disable-warning=ExperimentalWarning scripts/demo.js",
+    "mock-llm": "node --disable-warning=ExperimentalWarning test/mocks/serve.js",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/{providers,db,journal,server}/**/*.test.js\"",
+    "test:e2e": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/e2e/**/*.e2e.js\"",
+    "check": "node --disable-warning=ExperimentalWarning scripts/check.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
