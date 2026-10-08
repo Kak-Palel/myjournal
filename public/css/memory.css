@@ -1,1 +1,76 @@
-/* memory view styles (owned by the frontend agents) */
+/* Memory view. New custom properties are prefixed --memory-. The switch and counter styles come from
+   settings.css (.settings-switch, .settings-counter), which defines them for the views owned by the same team. */
+
+:root {
+  /* Deeper green for text on --primary-soft (base.css pairs them at about 4.1:1; AA needs 4.5). */
+  --memory-ink: color-mix(in srgb, var(--primary) 72%, var(--text));
+  --memory-pin: var(--primary);
+  --memory-row-hover: color-mix(in srgb, var(--surface-2) 70%, var(--surface));
+}
+
+.memory-page { max-width: 780px; margin-inline: auto; }
+.memory-page > .card, .memory-page > section.card { margin-bottom: 1rem; }
+.memory-page .page-header { align-items: center; }
+.memory-count { font-size: 0.875rem; font-weight: 600; padding: 0.3rem 0.85rem; background: var(--primary-soft); color: var(--primary); }
+.memory-card-title { margin: 0 0 0.75rem; font-size: 1.1rem; }
+
+/* ------------------------------------------------------------------ explainer */
+.memory-points { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem 1.5rem; }
+.memory-point { display: flex; gap: 0.8rem; align-items: flex-start; }
+.memory-point p { margin: 0.1rem 0 0; font-size: 0.9rem; line-height: 1.5; }
+.memory-point-icon { flex: none; width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); }
+
+/* ------------------------------------------------------------------- switches */
+.memory-off { margin-bottom: 1rem; }
+.memory-off:empty { display: none; }
+
+/* ------------------------------------------------------------------- add form */
+.memory-add .settings-counter-wrap { margin-top: 0.15rem; }
+
+/* ----------------------------------------------------------------------- list */
+.memory-list-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.5rem; }
+.memory-list-head .memory-card-title { margin: 0; }
+.memory-filter-row { position: relative; display: flex; align-items: center; margin-bottom: 0.75rem; }
+.memory-filter-row .icon { position: absolute; left: 0.8rem; color: var(--text-muted); pointer-events: none; }
+.memory-filter { padding-left: 2.4rem; }
+.memory-list { list-style: none; margin: 0; padding: 0; }
+.memory-item {
+  display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.85rem 0.25rem 0.85rem 0.9rem; border-top: 1px solid var(--border);
+  border-left: 3px solid transparent; transition: background 0.12s;
+}
+.memory-item:first-child { border-top: 0; }
+.memory-item:hover, .memory-item:focus-within { background: var(--memory-row-hover); }
+.memory-item.is-pinned { border-left-color: var(--memory-pin); }
+.memory-item.is-busy { opacity: 0.6; }
+.memory-main { flex: 1 1 auto; min-width: 0; }
+.memory-text { margin: 0 0 0.25rem; font-family: var(--font-serif); font-size: 1.075rem; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
+.memory-meta { margin: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem 0.75rem; font-size: 0.8125rem; }
+.memory-source { display: inline-flex; align-items: center; gap: 0.25rem; }
+.memory-actions { flex: none; display: flex; align-items: center; gap: 0.1rem; }
+.memory-icon-btn { min-width: 44px; min-height: 44px; color: var(--text-muted); }
+.memory-icon-btn:hover { color: var(--text); }
+.memory-icon-btn.is-on { color: var(--memory-pin); background: var(--primary-soft); }
+.memory-delete:hover { color: var(--danger); }
+.memory-confirm { gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; padding-top: 0.25rem; }
+.memory-confirm-text { font-size: 0.9rem; font-weight: 600; }
+.memory-editing { display: flex; flex-direction: column; gap: 0.5rem; }
+.memory-edit-actions { gap: 0.5rem; }
+.memory-edit-hint { margin-left: auto; }
+.memory-nomatch { margin: 0.5rem 0 0; }
+
+@media (max-width: 560px) {
+  .memory-item { flex-wrap: wrap; padding-left: 0.7rem; }
+  .memory-actions { width: 100%; justify-content: flex-end; margin-top: -0.25rem; }
+  .memory-confirm { justify-content: flex-start; }
+  .memory-edit-hint { display: none; }
+  .memory-page > .card, .memory-page > section.card { padding: 1rem; }
+}
+
+/* ---------------------------------------------------- contrast + touch (AA, 44px) */
+.memory-count, .memory-page .chip-primary, .memory-source { color: var(--memory-ink); }
+@media (max-width: 899px), (pointer: coarse) {
+  .memory-page .btn, .memory-page .btn-sm, .memory-page .input, .memory-page .textarea { min-height: 44px; }
+  .memory-page .textarea { min-height: 80px; }
+}
+.memory-page ::placeholder { color: var(--text-muted); opacity: 1; }
+.memory-page .notice-body { overflow-wrap: anywhere; min-width: 0; }

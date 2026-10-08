@@ -17,24 +17,33 @@ const NAMES = ['think', 'thinking', 'reasoning'];
 const lowerAscii = (s) => s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
 
 const OPEN_TAGS = NAMES.map((name) => ({ name, text: `<${name}>`, close: `</${name}>` }));
+const LONGEST_OPEN_TAG = Math.max(...OPEN_TAGS.map((tag) => tag.text.length));
 
-/** @param {string} buf starts with '<'. @returns {{tag: object}|{partial: true}|null} */
-function matchOpenTag(buf) {
-  const lower = lowerAscii(buf);
+// Cost note: case-folding is O(length), so it must never be applied to "the rest of the buffer" once per tag or
+// per block (a 200 KB chunk of "<a>" took seconds and froze the event loop). Opening tags only look at a
+// bounded window, closing tags search one folded copy of the chunk that is built at most once per push().
+
+/**
+ * @param {string} buf
+ * @param {number} pos index of a '<' in `buf`
+ * @returns {{tag: object}|{partial: true}|null}
+ */
+function matchOpenTag(buf, pos) {
+  const head = lowerAscii(buf.slice(pos, pos + LONGEST_OPEN_TAG));
   for (const tag of OPEN_TAGS) {
-    if (lower.startsWith(tag.text)) return { tag };
+    if (head.startsWith(tag.text)) return { tag };
   }
-  if (OPEN_TAGS.some((tag) => buf.length < tag.text.length && tag.text.startsWith(lower))) {
-    return { partial: true };
-  }
+  // Fewer characters left than the tag is long (so `head` is all there is): the stream may still complete it.
+  if (OPEN_TAGS.some((tag) => buf.length - pos < tag.text.length && tag.text.startsWith(head))) return { partial: true };
   return null;
 }
 
-/** Longest suffix of `buf` that is a proper prefix of `closeTag` (case-insensitive). */
-function pendingCloseTail(buf, closeTag) {
-  const lower = lowerAscii(buf);
-  for (let n = Math.min(lower.length, closeTag.length - 1); n > 0; n -= 1) {
-    if (closeTag.startsWith(lower.slice(lower.length - n))) return buf.slice(buf.length - n);
+/** Longest suffix of `buf` (not reaching back before `from`) that is a proper prefix of `closeTag` (case-insensitive). */
+function pendingCloseTail(buf, from, closeTag) {
+  const tail = buf.slice(Math.max(from, buf.length - (closeTag.length - 1)));
+  const lower = lowerAscii(tail);
+  for (let n = lower.length; n > 0; n -= 1) {
+    if (closeTag.startsWith(lower.slice(lower.length - n))) return tail.slice(tail.length - n);
   }
   return '';
 }
@@ -81,41 +90,44 @@ export function createThinkFilter() {
   return {
     /** @param {string} chunk @returns {string} text that is safe to show now (possibly '') */
     push(chunk) {
-      let buf = pending + (chunk || '');
+      const buf = pending + (chunk || '');
       pending = '';
+      let pos = 0;
+      let lower = null;
+      const folded = () => (lower === null ? (lower = lowerAscii(buf)) : lower);
       let out = '';
       for (;;) {
         if (inThink) {
-          const idx = lowerAscii(buf).indexOf(closeTag);
+          const idx = folded().indexOf(closeTag, pos);
           if (idx === -1) {
-            pending = pendingCloseTail(buf, closeTag);
+            pending = pendingCloseTail(buf, pos, closeTag);
             break;
           }
-          buf = buf.slice(idx + closeTag.length);
+          pos = idx + closeTag.length;
           inThink = false;
           trimLeading = true;
           continue;
         }
-        const lt = buf.indexOf('<');
+        const lt = buf.indexOf('<', pos);
         if (lt === -1) {
-          out = emit(out, buf);
+          out = emit(out, buf.slice(pos));
           break;
         }
-        out = emit(out, buf.slice(0, lt));
-        buf = buf.slice(lt);
-        const found = matchOpenTag(buf);
+        out = emit(out, buf.slice(pos, lt));
+        pos = lt;
+        const found = matchOpenTag(buf, pos);
         if (found && found.partial) {
-          pending = buf;
+          pending = buf.slice(pos);
           break;
         }
         if (found) {
           inThink = true;
           closeTag = found.tag.close;
-          buf = buf.slice(found.tag.text.length);
+          pos += found.tag.text.length;
           continue;
         }
         out = emit(out, '<');
-        buf = buf.slice(1);
+        pos += 1;
       }
       return release(out);
     },

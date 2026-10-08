@@ -74,6 +74,7 @@ export function createContext(handle, now) {
     try {
       const result = fn();
       if (result && typeof result.then === 'function') {
+        result.then(undefined, () => {}); // the misuse error below is the one to report, not a later rejection
         throw new DbError('invalid', 'tx() callbacks must be synchronous: the transaction would commit before the promise settles');
       }
       handle.exec(nested ? `RELEASE ${savepoint}` : 'COMMIT');

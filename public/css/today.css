@@ -1,1 +1,126 @@
-/* today view styles (owned by the frontend agents) */
+/* Today view. New variables are prefixed --today-; colours come from base.css tokens. */
+
+:root {
+  --today-ring: color-mix(in srgb, var(--focus) 28%, transparent);
+  --today-prompt-bg: linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, var(--surface)), color-mix(in srgb, var(--primary) 12%, var(--surface)));
+  --today-touch: 44px;
+}
+
+.today-page { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+
+/* -------------------------------------------------------------------- hero */
+.today-hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 0.75rem 1rem; flex-wrap: wrap; }
+.today-greeting { margin: 0; font-family: var(--font-serif); font-size: clamp(1.7rem, 5vw, 2.2rem); font-weight: 600; letter-spacing: -0.01em; }
+.today-date { margin: 0.2rem 0 0; color: var(--text-muted); }
+.today-streak {
+  display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.3rem 0.8rem; border-radius: 999px;
+  background: var(--warn-soft); color: var(--text); font-size: 0.88rem; font-weight: 600;
+}
+.today-streak .icon { color: var(--warn); }
+.today-streak.is-risk { background: var(--surface-2); }
+.today-nudge-host:empty, .today-prompt-host:empty, .today-pinned-host:empty { display: none; }
+
+/* ----------------------------------------------------------------- composer */
+.today-composer { padding: 0; border-radius: var(--radius-lg); border-color: var(--border-strong); box-shadow: var(--shadow); transition: border-color 0.12s, box-shadow 0.12s; }
+.today-composer:focus-within { border-color: var(--focus); box-shadow: var(--shadow), 0 0 0 3px var(--today-ring); }
+.today-prompt-ctx {
+  display: flex; align-items: flex-start; gap: 0.6rem; margin: 0.9rem 1rem 0; padding: 0.6rem 0.75rem; border-radius: var(--radius);
+  background: var(--primary-soft); color: var(--text); font-family: var(--font-serif); font-size: 1.02rem; line-height: 1.5;
+}
+.today-prompt-ctx .icon { margin-top: 0.2rem; color: var(--primary-hover); }
+.today-prompt-ctx-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.today-prompt-ctx-x { flex: none; display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 50%; background: transparent; color: var(--text-muted); cursor: pointer; position: relative; }
+.today-prompt-ctx-x::after { content: ""; position: absolute; inset: -8px; }
+.today-prompt-ctx-x:hover { background: color-mix(in srgb, var(--text) 10%, transparent); color: var(--text); }
+.today-input {
+  display: block; width: 100%; min-height: 8rem; padding: 1.1rem 1.25rem 0.5rem; border: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; resize: none; outline: none;
+  background: transparent; color: var(--text); font-family: var(--font-serif); font-size: 1.2rem; line-height: 1.7;
+}
+.today-input::placeholder { color: var(--text-muted); opacity: 1; }
+.today-interim { margin: 0; padding: 0 1.25rem 0.4rem; font-size: 0.9rem; font-style: italic; color: var(--text-muted); }
+.today-error { margin: 0; padding: 0.4rem 1.25rem; color: var(--danger); font-size: 0.92rem; }
+.today-mood { display: flex; align-items: center; gap: 0.5rem 0.75rem; flex-wrap: wrap; padding: 0.5rem 1.25rem 0; }
+.today-composer-bar { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.6rem 1rem 0.9rem 1.25rem; }
+.today-mood-label { font-size: 0.88rem; color: var(--text-muted); }
+.today-composer-actions { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
+.today-start { min-height: 46px; padding: 0.6rem 1.3rem; font-size: 1rem; }
+.today-hint { margin: 0; font-size: 0.78rem; color: var(--text-muted); }
+
+/* ------------------------------------------------------------ prompt of the day */
+.today-prompt { padding: 1.15rem 1.35rem 1.25rem; background: var(--today-prompt-bg); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.today-prompt-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; color: var(--text); }
+.today-prompt-head .icon { color: var(--accent); }
+.today-prompt-head h2 { margin: 0; font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; }
+.today-prompt-text { margin: 0 0 0.9rem; font-family: var(--font-serif); font-size: clamp(1.15rem, 3.4vw, 1.4rem); line-height: 1.5; color: var(--text); }
+.today-prompt-btn { background: var(--surface); }
+
+/* ---------------------------------------------------------- weekly reflection */
+.today-nudge { display: flex; gap: 0.9rem; align-items: flex-start; padding: 1rem 1.15rem; border: 1px solid var(--border); border-left: 4px solid var(--primary); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-sm); }
+.today-nudge-icon { flex: none; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50%; background: var(--primary-soft); color: var(--primary-hover); }
+.today-nudge-body { min-width: 0; }
+.today-nudge-body p { margin: 0.15rem 0 0.6rem; }
+
+/* ------------------------------------------------------------------ lists */
+.today-aside { display: flex; flex-direction: column; gap: 1.5rem; min-width: 0; }
+.today-list-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.6rem; }
+.today-list-head h2, .today-section-head h2 { display: flex; align-items: center; gap: 0.4rem; margin: 0; font-size: 1.1rem; }
+.today-viewall { display: inline-flex; align-items: center; gap: 0.1rem; min-height: 36px; padding: 0 0.25rem 0 0.5rem; border-radius: var(--radius-sm); font-size: 0.9rem; font-weight: 600; text-decoration: none; }
+.today-viewall:hover { background: var(--surface-2); }
+.today-entries { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.today-skeleton { padding: 0.25rem 0; }
+.today-section-error { margin: 0; overflow-wrap: anywhere; }
+
+/* --------------------------------------------------------------- guided grid */
+.today-section-head { margin-bottom: 0.9rem; }
+.today-section-head p { margin: 0.25rem 0 0; }
+.today-cat { margin-bottom: 1.25rem; }
+.today-cat-title { margin: 0 0 0.5rem; font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+.today-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 250px), 1fr)); gap: 0.75rem; }
+.today-grid > li { display: flex; }
+.today-guide {
+  display: flex; align-items: flex-start; gap: 0.85rem; width: 100%; min-height: 92px; padding: 0.9rem 1rem; text-align: left; cursor: pointer;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); color: var(--text); font: inherit;
+  transition: border-color 0.12s, box-shadow 0.12s, transform 0.12s;
+}
+.today-guide:hover { border-color: var(--primary); box-shadow: var(--shadow); transform: translateY(-1px); }
+.today-guide[disabled] { opacity: 0.6; cursor: progress; transform: none; }
+.today-guide-icon { flex: none; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; background: var(--primary-soft); color: var(--primary-hover); }
+.today-guide-body { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+.today-guide-title { font-weight: 650; }
+.today-guide-desc { font-size: 0.86rem; line-height: 1.4; color: var(--text-muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.today-guide-min { display: inline-flex; align-items: center; gap: 0.25rem; margin-top: 0.15rem; font-size: 0.78rem; color: var(--text-muted); }
+
+/* ------------------------------------------------------- wide screens: two columns */
+@media (min-width: 1100px) {
+  .today-page {
+    grid-template-columns: minmax(0, 1fr) 330px; column-gap: 2.25rem;
+    grid-template-areas: "hero hero" "write aside" "nudge aside" "prompt aside" "guided aside";
+    row-gap: 0; /* spacing is margin-based here so an empty area (no nudge, no prompt) collapses completely */
+  }
+  .today-page > * { margin-bottom: 1.5rem; }
+  .today-hero { grid-area: hero; }
+  .today-nudge-host { grid-area: nudge; }
+  .today-composer { grid-area: write; }
+  .today-prompt-host { grid-area: prompt; }
+  .today-guided-host { grid-area: guided; }
+  .today-aside { grid-area: aside; position: sticky; top: 1.5rem; }
+  .today-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ------------------------------------------------------------- touch + phones */
+@media (max-width: 520px) {
+  .today-input { font-size: 1.12rem; min-height: 7rem; padding: 1rem 1rem 0.4rem; }
+  .today-mood { padding: 0.4rem 1rem 0; }
+  .today-composer-bar { padding: 0.6rem 0.75rem 0.8rem 1rem; }
+  .today-composer-actions { width: 100%; }
+  .today-start { flex: 1; }
+  .today-hint { display: none; }
+}
+@media (pointer: coarse), (max-width: 899px) {
+  .today-page .btn, .today-page .btn-sm { min-height: var(--today-touch); }
+  .today-page .btn-icon { min-width: var(--today-touch); }
+  .today-viewall { min-height: var(--today-touch); }
+  .today-prompt-ctx-x { width: 32px; height: 32px; }
+}
+@media (hover: none) { .today-hint { display: none; } }
+@media (prefers-reduced-motion: reduce) { .today-guide:hover { transform: none; } }

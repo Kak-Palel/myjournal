@@ -9,8 +9,12 @@ import { effectiveApiKey, keyHint } from './env-keys.js';
 export const PROVIDER_IDS = Object.freeze(['gemini', 'openai', 'local']);
 /** Persona ids accepted in `persona.id`. */
 export const PERSONA_IDS = Object.freeze(['companion', 'coach', 'cbt', 'stoic', 'friend', 'custom']);
-/** Gemini thinking modes accepted in `ai.providers.gemini.thinking`. */
-export const THINKING_MODES = Object.freeze(['fast', 'default']);
+/**
+ * Gemini thinking modes accepted in `ai.providers.gemini.thinking` (ARCHITECTURE live-verified
+ * corrections): 'auto' sends no thinkingConfig, 'low' asks for thinkingLevel low. A stored legacy
+ * value ('fast' / 'default') is not in this list and therefore normalises to 'auto'.
+ */
+export const THINKING_MODES = Object.freeze(['auto', 'low']);
 
 /** Hard limits, exported so the UI and the docs can quote the same numbers. */
 export const SETTINGS_LIMITS = Object.freeze({
@@ -50,8 +54,9 @@ export const DEFAULT_SETTINGS = deepFreeze({
     providers: {
       gemini: {
         baseUrl: 'https://generativelanguage.googleapis.com',
-        model: 'gemini-flash-latest',
-        thinking: 'fast',
+        // Flash-Lite answers in ~1 s with the best free quota; gemini-flash-latest was often slow or busy.
+        model: 'gemini-flash-lite-latest',
+        thinking: 'auto',
         apiKey: '',
       },
       openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', apiKey: '' },
@@ -72,11 +77,7 @@ export function defaultSettings() {
 const ok = (value) => ({ value });
 const fail = (error) => ({ error });
 
-function codePointLength(text) {
-  let n = 0;
-  for (const _ of text) n++; // eslint-disable-line no-unused-vars
-  return n;
-}
+const codePointLength = (text) => Array.from(text).length;
 
 function truncateCodePoints(text, max) {
   return Array.from(text).slice(0, max).join('');
@@ -126,7 +127,7 @@ function textField({ max, singleLine = false, emptyMeansDefault = false }) {
 }
 
 // eslint-disable-next-line no-control-regex
-const URL_FORBIDDEN_CHARS = /[\u0000- \u007f-\u009f]/;
+const URL_FORBIDDEN_CHARS = /[\x00-\x20\x7f-\x9f]/;
 
 function parseBaseUrl(value, { defaultValue }) {
   if (typeof value !== 'string') return fail('must be a URL such as http://localhost:11434/v1');
@@ -142,6 +143,8 @@ function parseBaseUrl(value, { defaultValue }) {
     return fail('must be a valid URL such as http://localhost:11434/v1');
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return fail('must start with http:// or https://');
+  // WHATWG URL forgives "https:///host" and "http:/host"; a typo like that should be reported.
+  if (!/^https?:\/\/[^/]/i.test(s)) return fail('must look like http://host:port/path');
   if (!url.hostname) return fail('must include a host name');
   if (url.username || url.password) return fail('must not contain a username or password (use the API key field)');
   // Keys must never travel in URLs, so refuse the usual place people paste them.

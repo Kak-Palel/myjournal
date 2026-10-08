@@ -27,6 +27,7 @@ export const LIMITS = Object.freeze({
   templateId: 64,
   messageContent: 200_000,
   memoryText: 300,
+  memoryRaw: 4096,
   reportContent: 100_000,
   metaBytes: 16_384,
   metaDepth: 4,
@@ -105,12 +106,50 @@ export function localDateString(ms) {
 /** Cut to at most `max` code points without splitting a surrogate pair. */
 export function truncateChars(text, max) {
   if (text.length <= max) return text;
-  return Array.from(text).slice(0, max).join('');
+  // Array.from() allocates one element per code point, which is ruinous for a multi-megabyte string
+  // from a hostile import. `max` code points never need more than 2 * max UTF-16 units.
+  const head = text.length > max * 2 ? text.slice(0, max * 2) : text;
+  return Array.from(head).slice(0, max).join('');
+}
+
+// NUL ends a C string inside SQLite's text functions and FTS5, so anything after it silently
+// vanishes from the stored value; the other C0 controls (tab, newline, VT, FF and CR excepted) and
+// DEL have no business in titles, labels or short texts either.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u0008\u000e-\u001f\u007f]/g;
+
+/**
+ * Remove NUL and the other control characters and replace lone surrogates with U+FFFD, so the value
+ * we validate and compare is exactly what SQLite hands back later.
+ * @param {string} text
+ */
+export function cleanChars(text) {
+  return text.replace(CONTROL_CHARS, '').toWellFormed();
+}
+
+/** One clean line: control characters removed, whitespace collapsed, trimmed. */
+export function cleanLine(text) {
+  return cleanChars(text).replace(/\s+/g, ' ').trim();
+}
+
+/** True when `text` has more than `max` code points; never walks a huge string to find out. */
+export function exceedsChars(text, max) {
+  return text.length > max * 2 || Array.from(text).length > max;
+}
+
+// A label is cut to 24 characters anyway; looking at a bounded prefix keeps a hostile 40 MB "tag"
+// from costing seconds of regex work and hundreds of MB of memory.
+const LABEL_RAW_MAX = 256;
+
+function cleanLabel(item) {
+  const raw = item.length > LABEL_RAW_MAX ? item.slice(0, LABEL_RAW_MAX) : item;
+  return cleanLine(raw).replace(/^#+/, '').trim().toLowerCase();
 }
 
 /**
  * Lowercase, trimmed, de-duplicated labels (tags / emotions). Accepts an array or a comma
- * separated string; non-strings are ignored. Over-long labels are cut, extra labels dropped.
+ * separated string; non-strings are ignored. Control characters are removed, over-long labels are
+ * cut, extra labels dropped.
  * @param {unknown} list
  * @param {{ max: number, maxLen?: number }} opts
  * @returns {string[]}
@@ -121,21 +160,13 @@ export function normalizeLabels(list, { max, maxLen = LIMITS.labelLength }) {
   const seen = new Set();
   for (const item of items) {
     if (typeof item !== 'string') continue;
-    const label = truncateChars(item.replace(/\s+/g, ' ').trim().replace(/^#+/, '').trim().toLowerCase(), maxLen).trim();
+    const label = truncateChars(cleanLabel(item), maxLen).trim();
     if (!label || seen.has(label)) continue;
     seen.add(label);
     out.push(label);
     if (out.length >= max) break;
   }
   return out;
-}
-
-/** Strip characters that cannot be stored or displayed sensibly (NUL and other C0 controls except \n, \t). */
-// eslint-disable-next-line no-control-regex
-const CONTROL_EXCEPT_NEWLINE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
-
-export function cleanLine(text) {
-  return text.replace(/\s+/g, ' ').replace(CONTROL_EXCEPT_NEWLINE, '').trim();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -180,18 +211,19 @@ export function previewOf(text, max = 160) {
 }
 
 /**
- * Key used to detect duplicate memories: lowercase, collapsed whitespace, no leading bullet and no
- * trailing punctuation.
+ * Key used to detect duplicate memories: lowercase, collapsed whitespace, no leading bullet or
+ * quote and no trailing punctuation.
  * @param {string} text
  */
 export function normalizeMemoryText(text) {
-  return String(text ?? '')
+  // Same cleaning as when a memory is stored, so a candidate containing NUL still matches.
+  return cleanChars(String(text ?? ''))
     .normalize('NFKC')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/^[-*•\s]+/, '')
-    .replace(/[\s.!?,;:…。！？、"'”’)\]]+$/u, '');
+    .replace(/^[-*\u{2022}\u{201C}\u{2018}"'(\[\s]+/u, '')
+    .replace(/[\s.!?,;:\u{2026}\u{3002}\u{FF01}\u{FF1F}\u{3001}"'\u{201D}\u{2019})\]]+$/u, '');
 }
 
 // ---------------------------------------------------------------------------------------------

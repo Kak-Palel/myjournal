@@ -9,8 +9,9 @@ export const PROVIDER_IDS = Object.freeze(['gemini', 'openai', 'local']);
 export const PROVIDER_DEFAULTS = Object.freeze({
   gemini: Object.freeze({
     baseUrl: 'https://generativelanguage.googleapis.com',
-    model: 'gemini-flash-latest',
-    thinking: 'fast',
+    // Flash-Lite: ~1 s to the first byte and the best free quota (gemini-flash-latest was 16-23 s and often "busy").
+    model: 'gemini-flash-lite-latest',
+    thinking: 'auto',
     timeoutMs: 120_000,
   }),
   openai: Object.freeze({
@@ -55,7 +56,7 @@ export function withProviderDefaults(id, cfg = {}) {
     baseUrl: text(cfg.baseUrl) || d.baseUrl || '',
     model: text(cfg.model) || d.model || '',
     apiKey: text(cfg.apiKey),
-    thinking: id === 'gemini' ? (cfg.thinking === 'default' ? 'default' : 'fast') : undefined,
+    thinking: id === 'gemini' ? (cfg.thinking === 'low' ? 'low' : 'auto') : undefined,
     timeoutMs: finite(cfg.timeoutMs) && cfg.timeoutMs > 0 ? cfg.timeoutMs : d.timeoutMs,
   };
 }
@@ -66,7 +67,7 @@ export function withProviderDefaults(id, cfg = {}) {
  * @param {object} settings internal settings (settings.ai.providers[id], settings.ai.temperature, ...)
  * @param {Record<string, string|undefined>} [env]
  * @returns {{ id: string, baseUrl: string, model: string, apiKey: string, keySource: 'settings'|'env'|'none',
- *             thinking?: 'fast'|'default', timeoutMs: number, temperature?: number, maxTokens?: number }}
+ *             thinking?: 'auto'|'low', timeoutMs: number, temperature?: number, maxTokens?: number }}
  * @throws {ProviderError} bad_request for an unknown provider id
  */
 export function resolveProviderConfig(id, settings, env = process.env) {
@@ -91,7 +92,7 @@ export function resolveProviderConfig(id, settings, env = process.env) {
       ? clamp(Math.round(ai.timeoutSec * 1000), MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)
       : defaults.timeoutMs,
   };
-  if (id === 'gemini') cfg.thinking = saved.thinking === 'default' ? 'default' : 'fast';
+  if (id === 'gemini') cfg.thinking = saved.thinking === 'low' ? 'low' : 'auto';
   if (finite(ai.temperature)) cfg.temperature = clamp(ai.temperature, 0, 2);
   if (finite(ai.maxTokens) && ai.maxTokens > 0) cfg.maxTokens = clamp(Math.round(ai.maxTokens), 1, 200_000);
   return cfg;

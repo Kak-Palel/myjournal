@@ -31,6 +31,46 @@ export function describeUrl(url) {
   }
 }
 
+const PRIVATE_HOST = /^(localhost|127(?:\.\d{1,3}){3}|\[::1\]|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}|[^/:]+\.local)(?::\d+)?(?:[/?#]|$)/i;
+const SCHEMELESS = /^(\[[0-9a-f:.]+\]|[a-z0-9._-]+)(:\d+)?([/?#].*)?$/i;
+
+/**
+ * Parse a user-typed server address. A missing scheme is forgiven (http for local/private hosts, https
+ * otherwise); credentials, query strings and non-http(s) schemes are rejected with `bad_base_url`.
+ * The fragment is dropped silently because it is never sent.
+ * @param {string} raw
+ * @param {{provider: string, preferHttp?: boolean}} opts
+ * @returns {URL}
+ * @throws {ProviderError}
+ */
+export function parseHttpUrl(raw, { provider, preferHttp = false }) {
+  const bad = (message, hint) => new ProviderError('bad_base_url', message, { provider, hint });
+  let s = typeof raw === 'string' ? raw.trim() : '';
+  if (!s) throw bad('No server address is set.', 'Enter the base URL in Settings, for example http://localhost:11434/v1.');
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
+    if (!SCHEMELESS.test(s)) {
+      throw bad('That does not look like a web address.', 'Use a full address such as http://localhost:11434/v1.');
+    }
+    s = `${preferHttp || PRIVATE_HOST.test(s) ? 'http' : 'https'}://${s}`;
+  }
+  let url;
+  try {
+    url = new URL(s);
+  } catch {
+    throw bad('That does not look like a valid web address.', 'Use a full address such as http://localhost:11434/v1.');
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw bad('Only http:// and https:// addresses are supported.');
+  }
+  if (url.username || url.password) {
+    throw bad('The address must not contain a username or password.', 'Put the API key in the API key field instead.');
+  }
+  if (url.search) {
+    throw bad('The address must not contain a "?" query string.', 'Remove everything from the "?" onwards.');
+  }
+  return url;
+}
+
 /** Collapse whitespace and cap the length, so upstream text fits on one line of a message. */
 export function oneLine(text, max = 300) {
   const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
@@ -136,6 +176,12 @@ export function networkError(err, ctx) {
   const local = ctx.provider === 'local';
   const base = { cause: err };
 
+  if (/invalid header|bytestring|header value/.test(text)) {
+    // Undici quotes the offending header value (our Authorization header) in this error, so the cause is dropped.
+    return fail('auth', 'The API key contains characters that cannot be sent in a request.', {
+      hint: 'Paste the key into Settings again. It should have no line breaks, quotes or fancy symbols.',
+    });
+  }
   if (code === 'ERR_INVALID_URL' || /invalid url|unknown scheme|bad port|includes credentials|invalid (?:host|port)/.test(text)) {
     return fail('bad_base_url', 'The server address is not valid.', {
       ...base,
@@ -183,15 +229,16 @@ function timeoutError(kind, ctx, ms) {
   const fail = errorFactory(ctx.provider, ctx.secrets || []);
   const who = DISPLAY_NAMES[ctx.provider] || 'The server';
   const secs = Math.max(1, Math.round(ms / 1000));
+  const unit = secs === 1 ? 'second' : 'seconds';
   const local = ctx.provider === 'local';
   if (kind === 'idle') {
-    return fail('timeout', `${who} stopped responding in the middle of the reply (no data for ${secs} seconds).`, {
+    return fail('timeout', `${who} stopped responding in the middle of the reply (no data for ${secs} ${unit}).`, {
       hint: local
         ? 'The machine may be overloaded. Try again, or use a smaller model.'
         : 'Try again. If it keeps happening, check the service status.',
     });
   }
-  return fail('timeout', `${who} did not answer within ${secs} seconds.`, {
+  return fail('timeout', `${who} did not answer within ${secs} ${unit}.`, {
     hint: local
       ? 'The first request after starting a model loads it into memory and can be slow. Try again, or raise the timeout in Settings.'
       : 'Try again in a moment, or raise the timeout in Settings.',
@@ -232,8 +279,6 @@ export function createScope({ signal, firstByteMs, idleMs = DEFAULT_IDLE_MS, ctx
       expiredMs = ms;
       controller.abort(new Error(`${kind} timeout`));
     }, Math.min(ms, 2 ** 31 - 1));
-    // Never keep the process alive just for a timeout; the in-flight socket does that.
-    if (typeof timer.unref === 'function') timer.unref();
   };
   const onCallerAbort = () => {
     stop();
@@ -256,6 +301,24 @@ export function createScope({ signal, firstByteMs, idleMs = DEFAULT_IDLE_MS, ctx
     touch() { arm(currentIdleMs, 'idle'); },
     /** Change the idle allowance (used for the short grace period after the final chunk). */
     setIdle(ms) { currentIdleMs = ms; },
+    /**
+     * Settle with `promise`, or reject as soon as this scope is aborted or times out. Real fetch/streams already
+     * do that; this also covers fetch doubles that ignore their signal, so a hung double cannot hang us.
+     */
+    race(promise) {
+      if (controller.signal.aborted) {
+        Promise.resolve(promise).catch(() => {});
+        return Promise.reject(controller.signal.reason || new Error('aborted'));
+      }
+      return new Promise((resolve, reject) => {
+        const onAbort = () => reject(controller.signal.reason || new Error('aborted'));
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+        Promise.resolve(promise).then(
+          (value) => { controller.signal.removeEventListener('abort', onAbort); resolve(value); },
+          (err) => { controller.signal.removeEventListener('abort', onAbort); reject(err); },
+        );
+      });
+    },
     /** Throw the AbortError if the caller has aborted. */
     throwIfAborted() { if (signal && signal.aborted) throw abortError(); },
     /** Map anything thrown by fetch or a body reader to the right error. */
@@ -284,7 +347,7 @@ export function createScope({ signal, firstByteMs, idleMs = DEFAULT_IDLE_MS, ctx
  */
 export async function scopedFetch(fetchFn, url, init, scope) {
   try {
-    return await fetchFn(url, { ...init, signal: scope.signal, redirect: 'manual' });
+    return await scope.race(fetchFn(url, { ...init, signal: scope.signal, redirect: 'manual' }));
   } catch (err) {
     throw scope.fail(err);
   }
@@ -306,7 +369,7 @@ export async function* readChunks(response, scope) {
       scope.throwIfAborted();
       let step;
       try {
-        step = await reader.read();
+        step = await scope.race(reader.read());
       } catch (err) {
         throw scope.fail(err);
       }

@@ -120,6 +120,50 @@ export function assertNotNewer(handle, migrations = MIGRATIONS) {
   return found;
 }
 
+const SQLITE_READONLY = 8; // primary result code; extended codes (e.g. READONLY_DBMOVED) keep it in the low byte
+
+function isReadOnlyError(err) {
+  const code = typeof err?.errcode === 'number' ? err.errcode & 0xff : 0;
+  return code === SQLITE_READONLY || /readonly|read-only/i.test(String(err?.message));
+}
+
+/**
+ * Fail fast if the database can only be read. SQLite silently opens a file the process may not
+ * write (for instance a root-owned file left by one `sudo npm start`) in read-only mode, and the
+ * first save of a journal entry would then fail at request time instead of at startup.
+ *
+ * It really writes a page and rolls back: in WAL mode BEGIN IMMEDIATE alone succeeds on a read-only
+ * file (the lock lives in the shared-memory file), only an actual page write notices. Waits for a
+ * concurrent writer to finish (busy timeout).
+ * @param {import('node:sqlite').DatabaseSync} handle
+ * @param {string} [where] path shown in the message
+ * @throws {DbError} code 'open_failed' when the database is read-only
+ */
+export function assertWritable(handle, where = 'the journal database') {
+  let began = false;
+  try {
+    handle.exec('BEGIN IMMEDIATE');
+    began = true;
+    handle.exec(`PRAGMA user_version = ${readVersion(handle)}`);
+  } catch (err) {
+    if (began) {
+      try {
+        handle.exec('ROLLBACK');
+      } catch {
+        // already rolled back by SQLite
+      }
+    }
+    if (!isReadOnlyError(err)) throw err;
+    throw new DbError(
+      'open_failed',
+      `The journal database (${where}) is read-only, so nothing could be saved. Check the owner and permissions of the file and its folder ` +
+        '(a root-owned file left behind by an earlier run with sudo is a common cause).',
+      { cause: err },
+    );
+  }
+  handle.exec('ROLLBACK');
+}
+
 /**
  * Bring the database up to the latest schema. Safe to call from several processes at once: the
  * version is re-read inside the write lock.

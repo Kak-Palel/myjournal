@@ -1,1 +1,54 @@
-/* onboarding view styles (owned by the frontend agents) */
+/* Onboarding (bare layout). New custom properties are prefixed --onboarding-. */
+
+:root {
+  /* Deeper green for text on --primary-soft (base.css pairs them at about 4.1:1; AA needs 4.5). */
+  --onboarding-ink: color-mix(in srgb, var(--primary) 72%, var(--text));
+  --onboarding-card-border: var(--border);
+  --onboarding-glow: color-mix(in srgb, var(--primary) 14%, transparent);
+}
+
+.onboarding { min-height: calc(100vh - 4rem); display: flex; align-items: center; justify-content: center; padding: 1rem 0 2rem; }
+.onboarding-inner { width: 100%; max-width: 1000px; margin-inline: auto; }
+.onboarding-brand { display: inline-flex; align-items: center; gap: 0.5rem; font-weight: 700; font-size: 1.1rem; color: var(--primary); margin-bottom: 1.5rem; }
+.onboarding-title { font-family: var(--font-serif); font-size: clamp(1.9rem, 4.5vw, 2.8rem); font-weight: 600; line-height: 1.15; margin: 0 0 1rem; outline: none; }
+.onboarding-lead { max-width: 640px; font-size: 1.1rem; line-height: 1.65; color: var(--text-muted); margin: 0 0 2rem; }
+.onboarding-question { font-size: 1.2rem; margin: 0 0 1rem; }
+
+.onboarding-cards { list-style: none; margin: 0 0 1.25rem; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 1rem; }
+.onboarding-card {
+  position: relative; display: flex; flex-direction: column; gap: 0.35rem; padding: 1.25rem; border-radius: var(--radius-lg);
+  background: var(--surface); border: 1.5px solid var(--onboarding-card-border); box-shadow: var(--shadow-sm); transition: border-color 0.12s, box-shadow 0.12s, transform 0.12s;
+}
+.onboarding-card:hover, .onboarding-card:focus-within { border-color: var(--primary); box-shadow: var(--shadow), 0 0 0 4px var(--onboarding-glow); transform: translateY(-2px); }
+.onboarding-card.is-featured { border-color: var(--primary); }
+.onboarding-card-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.4rem; }
+.onboarding-card-icon { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); }
+.onboarding-card-title { margin: 0; font-size: 1.25rem; }
+.onboarding-card-tagline { margin: 0 0 0.6rem; color: var(--text-muted); }
+.onboarding-points { list-style: none; margin: 0 0 1.1rem; padding: 0; display: flex; flex-direction: column; gap: 0.55rem; flex: 1 1 auto; }
+.onboarding-points li { display: flex; gap: 0.55rem; align-items: flex-start; font-size: 0.925rem; line-height: 1.45; }
+.onboarding-points .icon { color: var(--primary); margin-top: 2px; }
+.onboarding-choose { justify-content: space-between; min-height: 48px; }
+/* The whole card is clickable, but only the button takes keyboard focus. The button must never get a transform:
+   base.css nudges .btn on :active, and a transformed ancestor would shrink this overlay to the button's own box
+   between mousedown and mouseup, so a click on the card body would be lost. */
+.onboarding-choose, .onboarding-choose:active { transform: none; }
+.onboarding-choose::after { content: ""; position: absolute; inset: 0; border-radius: var(--radius-lg); }
+.onboarding-card.is-featured .onboarding-choose { background: var(--primary); border-color: var(--primary); color: var(--primary-contrast); }
+.onboarding-card.is-featured .onboarding-choose:hover { background: var(--primary-hover); }
+.onboarding-choose:focus-visible { outline-offset: 3px; }
+
+.onboarding-none-wrap { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem; margin-top: 1.25rem; padding-top: 1.25rem; border-top: 1px solid var(--border); }
+.onboarding-none { min-height: 48px; }
+.onboarding-none-wrap p { margin: 0; max-width: 560px; }
+
+@media (max-width: 560px) {
+  .onboarding { align-items: flex-start; }
+  .onboarding-lead { font-size: 1rem; }
+  .onboarding-card { padding: 1rem; }
+  .onboarding-none { width: 100%; }
+}
+
+/* ---------------------------------------------------- contrast */
+.onboarding-card .chip-primary { color: var(--onboarding-ink); }
+.onboarding .notice-body { overflow-wrap: anywhere; min-width: 0; }

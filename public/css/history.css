@@ -1,1 +1,111 @@
-/* history view styles (owned by the frontend agents) */
+/* History view + the entry card shared with Today (.hcard). New variables are prefixed --history-. */
+
+:root {
+  --history-mark: color-mix(in srgb, var(--warn) 30%, transparent);
+  --history-ring: color-mix(in srgb, var(--focus) 28%, transparent);
+  --history-touch: 44px;
+}
+
+/* ------------------------------------------------------------------ controls */
+.hist-controls { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem; }
+.hist-search { position: relative; display: flex; align-items: center; }
+.hist-search-icon { position: absolute; left: 0.9rem; display: grid; color: var(--text-muted); pointer-events: none; }
+.hist-search-input {
+  width: 100%; min-height: 48px; padding: 0.6rem 2.75rem 0.6rem 2.7rem; border: 1px solid var(--border-strong); border-radius: 999px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 1rem; outline: none; -webkit-appearance: none; appearance: none;
+}
+.hist-search-input::placeholder { color: var(--text-muted); opacity: 1; }
+.hist-search-input:focus { border-color: var(--focus); box-shadow: 0 0 0 3px var(--history-ring); }
+.hist-search-input::-webkit-search-cancel-button { display: none; }
+.hist-search-clear {
+  position: absolute; right: 0.4rem; display: grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 50%;
+  background: transparent; color: var(--text-muted); cursor: pointer;
+}
+.hist-search-clear:hover { background: var(--surface-2); color: var(--text); }
+
+.hist-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; }
+.hist-moods { display: inline-flex; gap: 0.3rem; }
+.hist-chip {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem; min-height: 40px; min-width: 40px; padding: 0 0.85rem;
+  border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface); color: var(--text); font: inherit; font-size: 0.9rem; cursor: pointer;
+}
+.hist-chip:hover { background: var(--surface-2); }
+.hist-chip.is-on { background: var(--primary-soft); border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); font-weight: 600; }
+.hist-mood { padding: 0; font-size: 1.2rem; }
+.hist-tag-select {
+  min-height: 40px; max-width: 12rem; padding: 0 0.75rem; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface);
+  color: var(--text); font: inherit; font-size: 0.9rem; cursor: pointer;
+}
+.hist-clear { min-height: 40px; padding: 0 0.5rem; border: 0; background: none; color: var(--primary-hover); font: inherit; font-size: 0.9rem; font-weight: 600; text-decoration: underline; cursor: pointer; }
+.hist-count { margin: 0 0 0.75rem; font-size: 0.9rem; overflow-wrap: anywhere; }
+/* The no-results title quotes the query, which can be one long unbroken token. */
+.hist-results .empty-title { overflow-wrap: anywhere; }
+
+/* -------------------------------------------------------------------- list */
+.hist-month-title { margin: 1.6rem 0 0.6rem; font-size: 0.82rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); }
+.hist-month:first-child .hist-month-title { margin-top: 0.25rem; }
+.hist-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+.hist-skeleton { display: flex; flex-direction: column; gap: 0.6rem; }
+.hist-skeleton-card { padding: 0.9rem 1.1rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.hist-more { display: flex; justify-content: center; margin-top: 1.5rem; }
+.hist-more:empty { display: none; }
+
+/* -------------------------------------------------------------------- card */
+.hcard {
+  position: relative; display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 0.9rem; padding: 0.95rem 1.1rem;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm);
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.hcard:hover { border-color: var(--border-strong); box-shadow: var(--shadow); }
+.hcard:has(.hcard-link:focus-visible) { outline: 3px solid var(--focus); outline-offset: 2px; }
+.hcard-mood {
+  display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; font-size: 1.35rem;
+  background: color-mix(in srgb, var(--history-mood, var(--text-muted)) 18%, var(--surface));
+  border: 2px solid color-mix(in srgb, var(--history-mood, var(--text-muted)) 55%, var(--surface));
+}
+.hcard-mood.is-none { background: var(--surface-2); border-color: var(--border); color: var(--text-muted); }
+.hcard-mood .mood-face { font-size: 1em; }
+.hcard-body { min-width: 0; }
+.hcard-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; }
+.hcard-title { margin: 0; font-size: 1.03rem; font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; }
+.hcard-link { color: var(--text); text-decoration: none; }
+/* With :has() the whole card shows the ring (see .hcard:has(...) above); without it the link keeps its own outline. */
+@supports selector(:has(*)) { .hcard-link:focus-visible { outline: none; } }
+.hcard-link::after { content: ""; position: absolute; inset: 0; border-radius: var(--radius); }
+.hcard-flags { display: inline-flex; gap: 0.35rem; color: var(--text-muted); flex: none; }
+.hcard-flag { display: inline-grid; }
+.hcard-meta { margin: 0.1rem 0 0; font-size: 0.82rem; color: var(--text-muted); }
+.hcard-preview {
+  margin: 0.4rem 0 0; font-family: var(--font-serif); font-size: 0.98rem; line-height: 1.55; color: var(--text-muted); overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.hcard-mark { background: var(--history-mark); color: var(--text); border-radius: 3px; padding: 0 1px; }
+.hcard-chips { list-style: none; margin: 0.6rem 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.hcard-chip { position: relative; z-index: 1; display: inline-flex; align-items: center; min-height: 26px; padding: 0 0.65rem; border-radius: 999px; font-size: 0.8rem; color: var(--text); border: 1px solid transparent; }
+.hcard-chip.is-emotion { background: var(--accent-soft); }
+.hcard-chip.is-tag { background: var(--surface-2); border-color: var(--border); }
+.hcard-chip.is-button { font: inherit; font-size: 0.8rem; cursor: pointer; }
+.hcard-chip.is-button::after { content: ""; position: absolute; inset: -9px -3px; }
+.hcard-chip.is-button:hover { border-color: var(--border-strong); background: var(--surface-3); }
+.hcard-more { font-size: 0.8rem; color: var(--text-muted); align-self: center; }
+
+/* Compact variant (Today) */
+.hcard.is-compact { grid-template-columns: 36px minmax(0, 1fr); gap: 0.75rem; padding: 0.7rem 0.9rem; }
+.hcard.is-compact .hcard-mood { width: 36px; height: 36px; font-size: 1.1rem; }
+.hcard.is-compact .hcard-title { font-size: 0.98rem; }
+.hcard.is-compact .hcard-preview { margin-top: 0.2rem; font-size: 0.9rem; -webkit-line-clamp: 1; }
+
+@media (max-width: 520px) {
+  .hcard { grid-template-columns: 40px minmax(0, 1fr); gap: 0.7rem; padding: 0.85rem 0.9rem; }
+  .hcard-mood { width: 40px; height: 40px; font-size: 1.2rem; }
+  .hist-tag-select { max-width: 100%; }
+}
+@media (pointer: coarse), (max-width: 899px) {
+  .hcard-chip { min-height: 32px; }
+  .hcard-chip.is-button::after { inset: -8px -4px; } /* inset is from the padding box (1px border), so this is ~46px tall */
+  .hist-page .btn { min-height: var(--history-touch); }
+  .hist-chip, .hist-tag-select, .hist-clear { min-height: var(--history-touch); }
+  .hist-mood { min-width: var(--history-touch); }
+  .hist-search-clear { width: var(--history-touch); height: var(--history-touch); }
+  .hist-search-input { min-height: 52px; }
+}

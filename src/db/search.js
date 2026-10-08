@@ -8,7 +8,8 @@
 // Raw user text never reaches MATCH: it is reduced to unicode letter/digit tokens and each token is
 // emitted as a double-quoted string (see buildMatchQuery).
 
-import { LIMITS, truncateChars } from './util.js';
+import { entryFilters } from './filters.js';
+import { countWords, truncateChars } from './util.js';
 
 const MAX_QUERY_TOKENS = 32;
 const MAX_TOKEN_LENGTH = 64;
@@ -22,7 +23,7 @@ const TOKEN_RE = /[\p{L}\p{N}][\p{L}\p{N}\p{M}]*/gu;
 // unicode61 keeps a run of Han/Kana/Thai... as ONE token, so "日記" cannot be found inside
 // "今日の日記" through the index. Such tokens (and emoji) also get a substring search.
 const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
-const PICTOGRAPH_RE = /\p{Extended_Pictographic}(?:️|\p{Emoji_Modifier}|‍\p{Extended_Pictographic})*/gu;
+const PICTOGRAPH_RE = /\p{Extended_Pictographic}(?:\u{FE0F}|\p{Emoji_Modifier}|\u{200D}\p{Extended_Pictographic})*/gu;
 
 /**
  * Split free text into distinct lowercase search tokens (unicode letters and digits).
@@ -108,7 +109,10 @@ export function makeSnippet(text, terms, max = SNIPPET_MAX) {
   const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
   if (flat.length <= max) return flat;
   const at = terms.length > 0 ? firstMatchIndex(flat, terms) : -1;
-  let start = at <= 0 ? 0 : Math.max(0, at - Math.floor(max * 0.3));
+  // Put the match a little before the middle so the reader sees the words that lead up to it,
+  // but never leave the window half empty when the match is near the end of the text.
+  let start = at <= 0 ? 0 : Math.max(0, at - Math.floor(max * 0.42));
+  start = Math.min(start, Math.max(0, flat.length - max + 1));
   // Do not begin in the middle of a word when a nearby space allows a clean start.
   if (start > 0) {
     const space = flat.indexOf(' ', start);
@@ -132,10 +136,10 @@ function likePattern(term) {
   return `%${term.replace(/[\\%_]/g, '\\$&')}%`;
 }
 
-const clampInt = (value, min, max, fallback) => {
+// Non-numeric or non-positive limits fall back to the default rather than silently returning 1 row.
+const parseLimit = (value) => {
   const n = Math.trunc(Number(value));
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, n));
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, MAX_LIMIT) : DEFAULT_LIMIT;
 };
 
 /**
@@ -153,8 +157,36 @@ export function createSearch(ctx) {
     }
   }
 
+  const totalWords = (parts) => parts.reduce((sum, text) => sum + countWords(text), 0);
+
+  // True while the index may still physically hold terms of rows that were replaced or deleted:
+  // FTS5 only appends "delete" markers and keeps the old segments until they are merged.
+  let stale = false;
+
+  /**
+   * Rebuild the FTS5 index from the stored row text so the terms of deleted and rewritten rows are
+   * physically dropped from the file. DELETE alone only appends "delete" markers and leaves the old
+   * segments (and with them every word of the deleted text) in place; the 'optimize' command is not
+   * enough either, because it keeps those markers when all segments sit below the top level.
+   * Costs about 150 ms per 12 000 messages and nothing for an empty or small journal.
+   */
+  function purge() {
+    ctx.handle.exec("INSERT INTO entry_search (entry_search) VALUES ('rebuild')");
+  }
+
+  /** purge() unless nothing was replaced or deleted since the last time; used when closing. */
+  function purgeIfStale() {
+    if (!stale) return;
+    purge();
+    stale = false;
+  }
+
+  function dropRow(rid) {
+    if (ctx.run('DELETE FROM entry_search WHERE rowid = :rid', { rid }).changes > 0) stale = true;
+  }
+
   function writeRow(rid, entryId, title, body, tags) {
-    ctx.run('DELETE FROM entry_search WHERE rowid = :rid', { rid });
+    dropRow(rid);
     ctx.run('INSERT INTO entry_search (rowid, entry_id, title, body, tags) VALUES (:rid, :entryId, :title, :body, :tags)', {
       rid,
       entryId,
@@ -188,7 +220,7 @@ export function createSearch(ctx) {
   /** Drop the index row of an entry (call before deleting the entry itself). */
   function removeEntry(entryId) {
     const row = ctx.one('SELECT rid FROM entries WHERE id = :id', { id: entryId });
-    if (row) ctx.run('DELETE FROM entry_search WHERE rowid = :rid', { rid: row.rid });
+    if (row) dropRow(row.rid);
   }
 
   function bodiesByEntry() {
@@ -209,18 +241,21 @@ export function createSearch(ctx) {
   function reindexAll() {
     return ctx.tx(() => {
       ctx.run('DELETE FROM entry_search');
+      stale = true;
       const bodies = bodiesByEntry();
-      const entries = ctx.prepare('SELECT rid, id, title, tags, emotions FROM entries ORDER BY rid').all();
+      const entries = ctx.prepare('SELECT rid, id, title, tags, emotions, word_count FROM entries ORDER BY rid').all();
       for (const row of entries) {
         const parts = bodies.get(row.id) ?? [];
         writeRow(row.rid, row.id, row.title, parts.join('\n'), tagsText(row));
+        const words = totalWords(parts);
+        if (words !== row.word_count) ctx.run('UPDATE entries SET word_count = :words WHERE rid = :rid', { words, rid: row.rid });
       }
       return entries.length;
     });
   }
 
   /**
-   * Compare the index with what reindexAll() would produce.
+   * Compare the index and the cached word counts with what reindexAll() would produce.
    * @returns {{ ok: boolean, problems: string[], entries: number, indexed: number }}
    */
   function checkConsistency() {
@@ -228,8 +263,9 @@ export function createSearch(ctx) {
     const bodies = bodiesByEntry();
     const indexed = new Map();
     for (const r of ctx.prepare('SELECT rowid AS rid, entry_id, title, body, tags FROM entry_search').all()) indexed.set(r.rid, { ...r });
-    const entries = ctx.prepare('SELECT rid, id, title, tags, emotions FROM entries').all();
+    const entries = ctx.prepare('SELECT rid, id, title, tags, emotions, word_count FROM entries').all();
     for (const row of entries) {
+      if (totalWords(bodies.get(row.id) ?? []) !== row.word_count) problems.push(`entry ${row.id}: stale word count`);
       const actual = indexed.get(row.rid);
       indexed.delete(row.rid);
       if (!actual) {
@@ -251,40 +287,22 @@ export function createSearch(ctx) {
     return { ok: problems.length === 0, problems, entries: entries.length, indexed: entries.length + indexed.size };
   }
 
-  // Shared WHERE fragments for both the FTS and the substring stage.
-  function filterClauses(opts, params) {
-    const where = [];
+  // Shared WHERE fragments for both the FTS and the substring stage. `filters` is the validated
+  // result of entryFilters(), the same parser entries.list() uses.
+  function filterClauses(opts, filters, params) {
+    const where = [...filters.where];
+    Object.assign(params, filters.params);
     if (!opts.includePrivate) where.push('e.private = 0');
     if (typeof opts.excludeEntryId === 'string' && opts.excludeEntryId) {
       where.push('e.id != :excludeId');
       params.excludeId = opts.excludeEntryId;
     }
-    if (Number.isInteger(opts.mood)) {
-      where.push('e.mood = :mood');
-      params.mood = opts.mood;
-    }
-    if (typeof opts.tag === 'string' && opts.tag.trim()) {
-      where.push('EXISTS (SELECT 1 FROM json_each(e.tags) WHERE json_each.value = :tag)');
-      params.tag = opts.tag.trim().toLowerCase();
-    }
-    if (typeof opts.from === 'string' && opts.from) {
-      where.push('e.entry_date >= :from');
-      params.from = opts.from;
-    }
-    if (typeof opts.to === 'string' && opts.to) {
-      where.push('e.entry_date <= :to');
-      params.to = opts.to;
-    }
-    if (opts.pinned === true || opts.pinned === false) {
-      where.push('e.pinned = :pinned');
-      params.pinned = opts.pinned ? 1 : 0;
-    }
     return where;
   }
 
-  function ftsStage(match, opts, limit) {
+  function ftsStage(match, opts, filters, limit) {
     const params = { match, limit };
-    const where = ['entry_search MATCH :match', ...filterClauses(opts, params)];
+    const where = ['entry_search MATCH :match', ...filterClauses(opts, filters, params)];
     const sql = `
       SELECT e.id AS entry_id, bm25(entry_search, 0.0, 6.0, 1.0, 2.5) AS score,
              entry_search.title AS title, entry_search.body AS body, entry_search.tags AS tags
@@ -302,9 +320,9 @@ export function createSearch(ctx) {
     }
   }
 
-  function substringStage(terms, mode, opts, limit) {
+  function substringStage(terms, mode, opts, filters, limit) {
     const params = { limit };
-    const where = filterClauses(opts, params);
+    const where = filterClauses(opts, filters, params);
     const likes = terms.map((term, i) => {
       params[`t${i}`] = likePattern(term);
       return `(entry_search.title || char(10) || entry_search.body || char(10) || entry_search.tags) LIKE :t${i} ESCAPE '\\'`;
@@ -330,14 +348,19 @@ export function createSearch(ctx) {
    *
    * @param {string} queryText untrusted user text
    * @param {{ limit?: number, excludeEntryId?: string, includePrivate?: boolean, mode?: 'all'|'any',
-   *           mood?: number, tag?: string, from?: string, to?: string, pinned?: boolean }} [options]
+   *           mood?: number|string, tag?: string, from?: string, to?: string, pinned?: boolean|string }} [options]
+   *   The entry filters accept exactly what entries.list() accepts (query-string values such as
+   *   mood '3' or pinned '1' included) and throw DbError('invalid') for malformed ones.
    * @returns {{ entryId: string, rank: number, snippet: string }[]} best first. `rank` is the BM25
    *   score (smaller = better, usually negative); substring-only hits have rank 0 and come last.
    */
   function search(queryText, options = {}) {
     const opts = options ?? {};
     const mode = opts.mode === 'any' ? 'any' : 'all';
-    const limit = clampInt(opts.limit, 1, MAX_LIMIT, DEFAULT_LIMIT);
+    const limit = parseLimit(opts.limit);
+    // Validate the filters before looking at the text, so a bad filter is an error even when the
+    // query itself turns out to be empty.
+    const filters = entryFilters(opts);
     const tokens = tokenize(queryText);
     const emoji = tokens.length === 0 ? pictographs(queryText) : [];
     if (tokens.length === 0 && emoji.length === 0) return [];
@@ -353,12 +376,12 @@ export function createSearch(ctx) {
     };
 
     if (tokens.length > 0) {
-      collect(ftsStage(buildMatchQuery(queryText, mode), opts, limit), tokens);
+      collect(ftsStage(buildMatchQuery(queryText, mode), opts, filters, limit), tokens);
     }
     const terms = tokens.length > 0 ? tokens : emoji;
     const needsSubstring = emoji.length > 0 || tokens.some((t) => NO_SPACE_SCRIPT.test(t));
     if (needsSubstring && hits.length < limit) {
-      const extra = substringStage(terms, mode, opts, limit + seen.size);
+      const extra = substringStage(terms, mode, opts, filters, limit + seen.size);
       collect(extra, terms);
     }
     return hits;
@@ -372,7 +395,6 @@ export function createSearch(ctx) {
     return makeSnippet(row.title || row.tags || '', terms);
   }
 
-  return Object.assign(search, { reindexEntry, removeEntry, reindexAll, checkConsistency, tokenize, buildMatchQuery, makeSnippet });
+  return Object.assign(search, { reindexEntry, removeEntry, reindexAll, checkConsistency, purge, purgeIfStale, tokenize, buildMatchQuery, makeSnippet });
 }
 
-export { LIMITS as _LIMITS_UNUSED };

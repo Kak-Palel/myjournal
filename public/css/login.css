@@ -1,1 +1,36 @@
-/* login view styles (owned by the frontend agents) */
+/* Login (bare layout). New custom properties are prefixed --login-. */
+
+:root {
+  --login-card-w: 400px;
+  --login-glow: color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+.login { min-height: calc(100vh - 4rem); display: grid; place-items: center; padding: 1rem 0; }
+.login-card {
+  width: 100%; max-width: var(--login-card-w); padding: 2rem 1.75rem; border-radius: var(--radius-lg); background: var(--surface);
+  border: 1px solid var(--border); box-shadow: var(--shadow), 0 0 0 8px var(--login-glow); text-align: center;
+}
+.login-badge { width: 56px; height: 56px; margin: 0 auto 1rem; border-radius: 50%; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); }
+.login-title { margin: 0 0 0.35rem; font-family: var(--font-serif); font-size: 1.7rem; font-weight: 600; }
+.login-sub { margin: 0 0 1.5rem; }
+.login-form { display: flex; flex-direction: column; gap: 0.5rem; text-align: left; }
+.login-input-wrap { display: flex; gap: 0.35rem; align-items: center; }
+.login-input { flex: 1 1 auto; min-width: 0; min-height: 48px; font-size: 1.05rem; }
+.login-reveal { flex: none; min-width: 48px; min-height: 48px; position: relative; }
+.login-reveal.is-on::after { content: ""; position: absolute; width: 22px; height: 2px; background: currentColor; transform: rotate(-40deg); border-radius: 2px; }
+.login-error {
+  display: flex; gap: 0.6rem; align-items: flex-start; padding: 0.65rem 0.8rem; border-radius: var(--radius-sm);
+  background: var(--danger-soft); color: var(--text); font-size: 0.9rem;
+}
+.login-error[hidden] { display: none; }
+.login-error .icon { color: var(--danger); margin-top: 2px; }
+.login-error p { margin: 0.1rem 0 0; color: var(--text-muted); }
+.login-submit { min-height: 48px; margin-top: 0.5rem; }
+.login-foot { margin: 1.25rem 0 0; }
+
+@media (max-width: 420px) {
+  .login-card { padding: 1.5rem 1.15rem; }
+}
+
+/* ---------------------------------------------------- contrast */
+.login ::placeholder { color: var(--text-muted); opacity: 1; }
