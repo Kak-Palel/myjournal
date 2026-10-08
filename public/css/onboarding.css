@@ -53,3 +53,7 @@
 /* ---------------------------------------------------- contrast */
 .onboarding-card .chip-primary { color: var(--onboarding-ink); }
 .onboarding .notice-body { overflow-wrap: anywhere; min-width: 0; }
+
+/* A key the server found in its environment: a quiet line between the tagline and the points. */
+.onboarding-env { display: flex; align-items: flex-start; gap: 0.45rem; margin: 0 0 0.75rem; padding: 0.4rem 0.75rem; border-radius: 12px; align-self: flex-start; background: var(--primary-soft); color: var(--onboarding-ink); font-size: 0.85rem; line-height: 1.35; font-weight: 600; overflow-wrap: anywhere; }
+.onboarding-env .icon { flex: none; margin-top: 2px; }

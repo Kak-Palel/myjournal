@@ -6,7 +6,8 @@ import { saveSettings, waitFor, withApp } from './helpers.js';
 const TEXT = 'I spent the morning planning my sister Maya\'s birthday party. I am excited but also tired because work was busy.';
 const REFLECTION = 'You carried a lot today and still found energy for Maya\'s party. Planning something kind for her seems to matter to you. Be gentle with yourself tonight.';
 const META = 'Title: Planning Maya\'s party\nSummary: Planned a birthday party for a sister while feeling excited and tired.\nEmotions: excited, tired\nTags: family, party';
-const MEMORY = '- Has a younger sister called Maya';
+// Grounded in TEXT ("my sister Maya"): the memory step drops a fact whose details ("younger") the entry never mentioned.
+const MEMORY = '- Has a sister called Maya';
 
 const wrapUp = (h, id, body = {}) => h.sse(`/api/entries/${id}/wrap-up`, body);
 const systemOf = (request) => request.body.messages.find((m) => m.role === 'system').content;
@@ -38,7 +39,7 @@ describe('POST /api/entries/:id/wrap-up', () => {
       assert.deepEqual(done.entry.emotions, ['excited', 'tired']);
       assert.deepEqual(done.entry.tags, ['family', 'party']);
       assert.equal(done.memories.length, 1);
-      assert.equal(done.memories[0].text, 'Has a younger sister called Maya');
+      assert.equal(done.memories[0].text, 'Has a sister called Maya');
       assert.equal(done.memories[0].sourceEntryId, entry.id);
       assert.deepEqual(stream.of('memories')[0].added, done.memories);
       assert.equal(stream.of('entry')[0].entry.title, 'Planning Maya\'s party');

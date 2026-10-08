@@ -154,10 +154,10 @@ describe('addresses that lead nowhere', () => {
     await ui.todayBox(page).waitFor();
   }));
 
-  // Confirmed in the browser: decodeURIComponent() in the router's match() sits outside its try/catch, so an address with
-  // broken percent-encoding throws "URIError: URI malformed" out of the hashchange handler (an uncaught page error), and
-  // the previous page simply stays on screen.
-  test('an address with broken percent-encoding does not throw', { skip: 'BUG: public/js/lib/router.js match() - decodeURIComponent throws URIError for "#/entry/%E0%A4%A" (uncaught page error); fix: wrap the decode in try/catch and treat the route as unmatched' }, () => journey({
+  // Regression: decodeURIComponent() in the router's match() sat outside its try/catch, so an address with broken
+  // percent-encoding threw "URIError: URI malformed" out of the hashchange handler (an uncaught page error) and the previous
+  // page simply stayed on screen. Such an address now matches no page and ends on Today like any other unknown one.
+  test('an address with broken percent-encoding does not throw', () => journey({
     name: 'links-bad-encoding',
   }, async (j) => {
     const { page } = j;

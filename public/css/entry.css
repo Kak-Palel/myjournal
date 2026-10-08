@@ -212,8 +212,11 @@
 .entry-summary-link { font-size: 0.88rem; }
 
 /* -------------------------------------------------------------------- dock */
+/* --kb-inset: how much of the page's bottom an on-screen keyboard covers (lib/keyboard-inset.js sets it only when a keyboard
+   covers the page without resizing it, as on iOS). Unset everywhere else, so every rule below equals its old value. */
+.entry-page { padding-bottom: var(--kb-inset, 0px); }
 .entry-dock {
-  position: sticky; bottom: 0; z-index: 20; padding-top: 1.4rem; margin-top: 0.5rem;
+  position: sticky; bottom: var(--kb-inset, 0px); z-index: 20; padding-top: 1.4rem; margin-top: 0.5rem;
   background: linear-gradient(to bottom, transparent, var(--bg) 1.4rem);
 }
 .entry-banner-host:empty { display: none; }
@@ -253,7 +256,7 @@
 
 /* -------------------------------------------------------- small screens, touch */
 @media (max-width: 899px) {
-  .entry-dock { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); }
+  .entry-dock { bottom: max(var(--kb-inset, 0px), calc(var(--tabbar-h) + env(safe-area-inset-bottom))); } /* a keyboard hides the tab bar */
   .entry-page { min-height: calc(100vh - var(--tabbar-h) - 3rem); }
 }
 @media (max-height: 560px) {
@@ -269,7 +272,7 @@
   .entry-msg-user .entry-bubble { max-width: 100%; }
   .entry-avatar { width: 26px; height: 26px; }
   .entry-ask { margin-left: 32px; }
-  .entry-btn-wrap span { max-width: 6.5rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .entry-wrap-again { display: none; } /* "Wrap up again" is "Wrap up" on a phone (the button's aria-label keeps the full name) */
 }
 @media (max-width: 400px) {
   .entry-bar .btn:not(.btn-icon) { padding-inline: 0.55rem; gap: 0.4rem; }

@@ -12,7 +12,8 @@ export function register(router, { db, ai }) {
 
   router.add('PUT', '/settings', async (ctx) => {
     const patch = await ctx.readJson({ expect: 'any' });
-    // Merge over the seeded settings so that environment defaults a person never changed stay as they were shown.
+    // Merge over the settings in force. On a fresh install those carry the environment's URL/model seeds, so this
+    // first Save writes them into the document exactly as the person saw them; after that the environment is out of it.
     const { settings, errors } = mergeSettings(ai.loadSettings(), patch);
     if (Object.keys(errors).length > 0) {
       throw new HttpError(400, 'invalid_settings', 'Some settings are not valid.', {
@@ -21,8 +22,7 @@ export function register(router, { db, ai }) {
       });
     }
     db.settings.set(settings);
-    // Answer with what GET will return and what the providers will use: the saved document with the environment's
-    // URL/model seeds applied, not the bare saved one (they differ when a saved value equals the built-in default).
+    // Answer with what GET will return and what the providers will use.
     ctx.json(ai.publicSettings());
   });
 }

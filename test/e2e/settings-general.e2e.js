@@ -101,9 +101,9 @@ describe('settings: General tab', () => {
     assert.equal(db.settings.get().profile.name, '');
   }));
 
-  // Confirmed in the browser: with ONLY the number cleared the form is not "dirty" (an empty field falls back to the saved
-  // value), so Save is dimmed and pressing it shows nothing at all.
-  test('clearing a number and pressing Save explains the problem', { skip: 'BUG: General tab - clearing a numeric field and pressing Save does nothing and shows no message (empty value is treated as "unchanged")' }, () => journey({ name: 'settings-general-empty-number' }, async (j) => {
+  // Regression: with ONLY the number cleared the form was not "dirty" (an empty field fell back to the saved value), so Save was
+  // dimmed and pressing it showed nothing at all. An emptied number now counts as an edit and Save explains what is wrong.
+  test('clearing a number and pressing Save explains the problem', () => journey({ name: 'settings-general-empty-number' }, async (j) => {
     const { page } = j;
     await openGeneral(j);
     await page.getByText('Reply length, context and timeout').click();

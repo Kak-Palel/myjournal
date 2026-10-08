@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { scrubSecrets } from '../../src/server/routes/providers.js';
+import { openDb } from '../../src/db/index.js';
+import { createAiService } from '../../src/server/ai-service.js';
+import { scrubSecrets, testTimeoutCapMs } from '../../src/server/routes/providers.js';
 import { createMockOpenAI } from '../mocks/mock-openai.js';
 import { freePort, saveSettings, waitFor, withApp } from './helpers.js';
 
@@ -56,6 +60,140 @@ describe('GET /api/providers', () => {
       assert.equal(byId.local.keySource, 'none');
       assert.doesNotMatch(res.text, /env-gemini-key-0000|sk-saved-key-9999/);
     });
+  });
+});
+
+describe('GET /api/providers: configured and keySource, as documented in ARCHITECTURE section 6', () => {
+  // The onboarding view shows "Found GEMINI_API_KEY in your environment" when a row says keySource === 'env'.
+  const ROW_KEYS = ['configured', 'defaultBaseUrl', 'defaultModel', 'description', 'id', 'keySource', 'label', 'needsKey', 'presets', 'privacyNote', 'suggestedModels', 'tagline'];
+  const byId = (res) => Object.fromEntries(res.json.providers.map((p) => [p.id, p]));
+
+  it('every row has exactly the documented fields (keyUrl only for Gemini)', async () => {
+    await withApp({}, async (h) => {
+      const res = await h.get('/api/providers');
+      for (const row of res.json.providers) {
+        const expected = row.id === 'gemini' ? [...ROW_KEYS, 'keyUrl'].sort() : ROW_KEYS;
+        assert.deepEqual(Object.keys(row).sort(), expected, row.id);
+        assert.equal(typeof row.configured, 'boolean', row.id);
+        assert.ok(['env', 'settings', 'none'].includes(row.keySource), row.id);
+      }
+    });
+  });
+
+  it('keySource is "none" with no key anywhere, "env" when only the environment has one, "settings" when a saved key exists', async () => {
+    await withApp({ ai: false }, async (h) => {
+      const none = byId(await h.get('/api/providers'));
+      assert.deepEqual([none.gemini.keySource, none.openai.keySource, none.local.keySource], ['none', 'none', 'none']);
+      assert.deepEqual([none.gemini.configured, none.openai.configured, none.local.configured], [false, false, true]);
+    });
+    await withApp({ ai: false, env: { GEMINI_API_KEY: 'env-gemini-key-0000' } }, async (h) => {
+      const row = byId(await h.get('/api/providers')).gemini;
+      assert.deepEqual([row.keySource, row.configured], ['env', true]);
+      // a saved key wins over the environment and says so
+      saveSettings(h.db, { ai: { providers: { gemini: { apiKey: 'saved-gemini-key-1111' } } } });
+      const saved = byId(await h.get('/api/providers')).gemini;
+      assert.deepEqual([saved.keySource, saved.configured], ['settings', true]);
+      // clearing it brings the environment back
+      saveSettings(h.db, { ai: { providers: { gemini: { apiKey: null } } } });
+      assert.equal(byId(await h.get('/api/providers')).gemini.keySource, 'env');
+    });
+  });
+
+  it('every environment variable that can supply a key is recognised, for its own provider only', async () => {
+    const cases = [
+      [{ GEMINI_API_KEY: 'k-gemini-0001' }, 'gemini'],
+      [{ GOOGLE_API_KEY: 'k-google-0002' }, 'gemini'],
+      [{ OPENAI_API_KEY: 'k-openai-0003' }, 'openai'],
+      [{ LOCAL_LLM_API_KEY: 'k-local-0004' }, 'local'],
+    ];
+    for (const [env, provider] of cases) {
+      await withApp({ ai: false, env }, async (h) => {
+        const rows = byId(await h.get('/api/providers'));
+        for (const id of ['gemini', 'openai', 'local']) assert.equal(rows[id].keySource, id === provider ? 'env' : 'none', `${Object.keys(env)[0]} -> ${id}`);
+        assert.equal(rows[provider].configured, true);
+        assert.doesNotMatch(JSON.stringify(rows), new RegExp(Object.values(env)[0]), 'the key itself is never in the catalog');
+      });
+    }
+    // a blank variable does not count
+    await withApp({ ai: false, env: { GEMINI_API_KEY: '   ', OPENAI_API_KEY: '' } }, async (h) => {
+      const rows = byId(await h.get('/api/providers'));
+      assert.deepEqual([rows.gemini.keySource, rows.openai.keySource], ['none', 'none']);
+    });
+  });
+
+  it('configured needs a key for Gemini and OpenAI-compatible, never for the local provider', async () => {
+    await withApp({ ai: false }, async (h) => {
+      saveSettings(h.db, { ai: { providers: { openai: { apiKey: 'sk-saved-key-9999' } } } });
+      const rows = byId(await h.get('/api/providers'));
+      assert.deepEqual([rows.gemini.configured, rows.openai.configured, rows.local.configured], [false, true, true]);
+      assert.equal(rows.openai.keySource, 'settings');
+      assert.equal(rows.local.keySource, 'none', 'configured is true without a key, keySource stays "none"');
+    });
+  });
+});
+
+describe('the key typed into the form (overlay) is used once and then gone', () => {
+  const OVERLAY_KEY = 'sk-overlay-NEVERSTORE-7788991122';
+
+  it('never reaches a response, the request log, the error log or the database files, whatever the upstream does', async () => {
+    const logged = [];
+    const logger = { request: (i) => logged.push(JSON.stringify(i)), warn: (m, e) => logged.push(`${m} ${e && e.stack}`), error: (m, e) => logged.push(`${m} ${e && e.stack}`) };
+    await withApp({ ai: false, config: { logger } }, async (h) => {
+      const answers = [];
+      const hostile = await createMockOpenAI({ failures: ['echo_key'], apiKey: [OVERLAY_KEY] });
+      const good = await createMockOpenAI({ apiKey: [OVERLAY_KEY], models: ['m1'] });
+      try {
+        const port = await freePort();
+        const attempts = [
+          ['test', { provider: 'openai', config: { baseUrl: good.baseUrl, model: 'm1', apiKey: OVERLAY_KEY } }],
+          ['test', { provider: 'openai', config: { baseUrl: hostile.baseUrl, apiKey: OVERLAY_KEY } }],
+          ['test', { provider: 'openai', config: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: OVERLAY_KEY } }],
+          ['test', { provider: 'openai', config: { baseUrl: 'http://127.0.0.1:6000/v1', apiKey: OVERLAY_KEY } }],
+          ['test', { provider: 'openai', config: { baseUrl: 'not a url', apiKey: OVERLAY_KEY } }],
+          ['test', { provider: 'gemini', config: { baseUrl: `http://127.0.0.1:${port}`, apiKey: OVERLAY_KEY } }],
+          ['models', { provider: 'openai', config: { baseUrl: good.baseUrl, apiKey: OVERLAY_KEY } }],
+          ['models', { provider: 'openai', config: { baseUrl: hostile.baseUrl, apiKey: OVERLAY_KEY } }],
+          ['models', { provider: 'openai', config: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: OVERLAY_KEY } }],
+          ['local/pull', { model: 'qwen2.5:1.5b', config: { baseUrl: good.baseUrl, apiKey: OVERLAY_KEY } }],
+        ];
+        for (const [route, body] of attempts) {
+          const res = route === 'local/pull' ? await h.sse('/api/providers/local/pull', body) : await h.post(`/api/providers/${route}`, body);
+          answers.push(route === 'local/pull' ? res.raw : res.text);
+        }
+        // a key the HTTP client cannot even put in a header (undici quotes the value in the error it throws)
+        const odd = await h.post('/api/providers/test', { provider: 'openai', config: { baseUrl: good.baseUrl, apiKey: 'sch\u00fcssel-NEVERSTORE-5566' } });
+        answers.push(odd.text);
+        assert.equal(odd.json.ok, false);
+      } finally {
+        await hostile.close();
+        await good.close();
+      }
+      const everything = [...answers, ...logged].join('\n');
+      assert.ok(answers.length > 5 && logged.length > 5, 'something was answered and logged');
+      assert.doesNotMatch(everything, /NEVERSTORE|OVERLAY/i, 'not in any response or log line');
+      assert.equal(h.db.settings.exists(), false, 'saving nothing is what "test before you save" means');
+      for (const name of readdirSync(h.dir)) assert.ok(!readFileSync(join(h.dir, name)).includes('NEVERSTORE'), `${name} does not contain the key`);
+    });
+  });
+});
+
+describe('Test connection waits long enough for a cold local model', () => {
+  it('local gets the full configured timeout (up to 300 s), the hosted providers stay capped at 90 s', () => {
+    assert.equal(testTimeoutCapMs('local'), 300_000);
+    assert.equal(testTimeoutCapMs('openai'), 90_000);
+    assert.equal(testTimeoutCapMs('gemini'), 90_000);
+    const db = openDb({ file: ':memory:' });
+    try {
+      const ai = createAiService({ db, env: {} });
+      // defaults: the 180 s first-byte allowance survives for the local provider, hosted ones are cut to 90 s
+      assert.equal(ai.buildWithOverlay('local', {}, { timeoutCapMs: testTimeoutCapMs('local') }).cfg.timeoutMs, 180_000);
+      assert.equal(ai.buildWithOverlay('openai', {}, { timeoutCapMs: testTimeoutCapMs('openai') }).cfg.timeoutMs, 90_000);
+      assert.equal(ai.buildWithOverlay('gemini', {}, { timeoutCapMs: testTimeoutCapMs('gemini') }).cfg.timeoutMs, 90_000);
+      db.settings.set({ ai: { timeoutSec: 600 } });
+      assert.equal(ai.buildWithOverlay('local', {}, { timeoutCapMs: testTimeoutCapMs('local') }).cfg.timeoutMs, 300_000, 'never more than Node itself waits for headers');
+    } finally {
+      db.close();
+    }
   });
 });
 
@@ -146,6 +284,23 @@ describe('POST /api/providers/test', () => {
       assert.equal(junk.status, 200);
       assert.equal(junk.json.ok, false);
       assert.equal(junk.json.error.code, 'bad_base_url');
+    });
+  });
+
+  it('names a blocked port (6000, 10080: fetch refuses them) instead of calling the address invalid', async () => {
+    await withApp({}, async (h) => {
+      for (const port of [6000, 10080]) {
+        const res = await h.post('/api/providers/test', { provider: 'local', config: { baseUrl: `http://127.0.0.1:${port}/v1` } });
+        assert.equal(res.status, 200);
+        assert.equal(res.json.ok, false);
+        assert.equal(res.json.error.code, 'bad_base_url');
+        assert.equal(res.json.error.message, 'That port is blocked.');
+        assert.match(res.json.error.hint, new RegExp(`port ${port} is on it`));
+        assert.match(res.json.error.hint, /another port/);
+        assert.doesNotMatch(res.text, /not valid/);
+      }
+      const models = await h.post('/api/providers/models', { provider: 'local', config: { baseUrl: 'http://127.0.0.1:6000/v1' } });
+      assert.equal(models.json.error.message, 'That port is blocked.');
     });
   });
 
@@ -383,7 +538,7 @@ describe('POST /api/providers/local/pull', () => {
 describe('PUT /api/settings and the environment seeds', () => {
   // Regression: PUT answered with the saved document while GET (and every provider call) used the document with
   // the environment's URL/model seeds applied, so the form showed one address right after saving and another
-  // after a reload.
+  // after a reload. Since then the seeds start a FRESH install only (see test/server/env-seed.test.js).
   const ENV = { OPENAI_BASE_URL: 'https://env.example/v1', LOCAL_LLM_BASE_URL: 'http://env-box:11434/v1', LOCAL_LLM_MODEL: 'env-model' };
 
   it('answers with exactly what the next GET returns', async () => {
@@ -391,7 +546,7 @@ describe('PUT /api/settings and the environment seeds', () => {
       const patches = [
         { profile: { name: 'Sam' } },
         { ai: { providers: { openai: { model: 'gpt-4.1-mini', apiKey: 'sk-test-1234567890' } } } },
-        { ai: { providers: { openai: { baseUrl: 'https://api.openai.com/v1' } } } }, // the built-in default, which the seed also covers
+        { ai: { providers: { openai: { baseUrl: 'https://api.openai.com/v1' } } } }, // the built-in default, chosen on purpose
         { ai: { providers: { local: { model: 'llama3.2:3b', baseUrl: 'http://localhost:11434/v1' } } } },
         { ai: { providers: { local: { model: 'qwen2.5:1.5b' } } } },
       ];
@@ -402,8 +557,9 @@ describe('PUT /api/settings and the environment seeds', () => {
         assert.deepEqual(put.json, get.json, `PUT and GET disagree after ${JSON.stringify(patch)}`);
       }
       const settings = (await h.get('/api/settings')).json;
-      assert.equal(settings.ai.providers.openai.baseUrl, 'https://env.example/v1', 'the seed shows through, in both answers');
+      assert.equal(settings.ai.providers.openai.baseUrl, 'https://api.openai.com/v1', 'a built-in default that was chosen explicitly is kept, whatever the environment says');
       assert.equal(settings.ai.providers.openai.model, 'gpt-4.1-mini');
+      assert.equal(settings.ai.providers.local.baseUrl, 'http://localhost:11434/v1');
       assert.equal(settings.ai.providers.local.model, 'qwen2.5:1.5b');
       assert.equal(settings.ai.providers.openai.apiKeySet, true);
       assert.doesNotMatch(JSON.stringify(settings), /sk-test-1234567890/, 'the key never comes back');
@@ -412,10 +568,14 @@ describe('PUT /api/settings and the environment seeds', () => {
 
   it('shows and keeps the seeds the first time settings are saved', async () => {
     await withApp({ ai: false, env: ENV }, async (h) => {
+      const before = (await h.get('/api/settings')).json;
+      assert.equal(before.ai.providers.local.baseUrl, 'http://env-box:11434/v1', 'a fresh install shows the seeds');
       const put = await h.put('/api/settings', { profile: { name: 'Robin' } });
       assert.equal(put.json.ai.providers.local.baseUrl, 'http://env-box:11434/v1');
       assert.equal(put.json.ai.providers.local.model, 'env-model');
+      assert.equal(put.json.ai.providers.openai.baseUrl, 'https://env.example/v1');
       assert.equal(h.db.settings.get().ai.providers.local.model, 'env-model', 'persisted, so a later change of the environment cannot flip it');
+      assert.equal(h.db.settings.get().ai.providers.openai.baseUrl, 'https://env.example/v1');
     });
   });
 });
@@ -424,10 +584,13 @@ describe('providers and the environment', () => {
   it('seeds the local model and address from LOCAL_LLM_* for a fresh install', async () => {
     const mock = await createMockOpenAI({ models: ['env-model'] });
     try {
-      await withApp({ ai: false, env: { LOCAL_LLM_BASE_URL: mock.baseUrl, LOCAL_LLM_MODEL: 'env-model' }, settings: { ai: { provider: 'local' } } }, async (h) => {
+      await withApp({ ai: false, env: { LOCAL_LLM_BASE_URL: mock.baseUrl, LOCAL_LLM_MODEL: 'env-model' } }, async (h) => {
         const settings = (await h.get('/api/settings')).json;
         assert.equal(settings.ai.providers.local.baseUrl, mock.baseUrl);
         assert.equal(settings.ai.providers.local.model, 'env-model');
+        assert.equal(h.db.settings.exists(), false, 'still a fresh install: nothing saved yet');
+        // the first thing a person does: choose the local provider (this first save writes the seeds explicitly)
+        assert.equal((await h.put('/api/settings', { ai: { provider: 'local' } })).status, 200);
         const test = await h.post('/api/providers/test', { provider: 'local' });
         assert.equal(test.json.ok, true);
         assert.equal(test.json.model, 'env-model');

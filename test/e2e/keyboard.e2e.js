@@ -34,13 +34,17 @@ describe('keyboard only', () => {
     assert.equal(await focusedName(page), 'Write a new journal entry');
     await page.keyboard.type('Typed with the keyboard only, no mouse involved.');
 
-    // mood: Tab to "Good", Space picks it
-    await tabTo(page, /^Good$/);
-    await page.keyboard.press('Space');
-    assert.equal(await ui.mood(page, 'Good').getAttribute('aria-checked'), 'true');
-    await page.keyboard.press('Space'); // pressing again clears it
+    // mood: a radio group is ONE Tab stop (the first mood while none is chosen) and the arrow keys move and choose
+    await tabTo(page, /^Awful$/);
+    for (let i = 0; i < 3; i += 1) await page.keyboard.press('ArrowRight'); // Awful -> Low -> Okay -> Good
+    assert.equal(await focusedName(page), 'Good');
+    assert.equal(await ui.mood(page, 'Good').getAttribute('aria-checked'), 'true', 'moving with the arrows chooses');
+    await page.keyboard.press('Space'); // pressing the chosen one clears it
     assert.equal(await ui.mood(page, 'Good').getAttribute('aria-checked'), 'false');
     await page.keyboard.press('Space');
+    assert.equal(await ui.mood(page, 'Good').getAttribute('aria-checked'), 'true');
+    await page.keyboard.press('Tab'); // the group is one stop: the next Tab leaves it for the next control
+    assert.notEqual(await focusedName(page), 'Great', 'Tab does not walk through the remaining mood buttons');
     await tabTo(page, /Start journaling/);
     await page.keyboard.press('Enter');
     await page.waitForURL(/#\/entry\//);
@@ -114,14 +118,14 @@ describe('keyboard only', () => {
     await eventually(async () => assert.equal(await focusedName(page), 'Edit this message'));
     await page.getByText('edited', { exact: true }).first().waitFor();
 
-    // delete: the dialog gets focus on its confirm button, Escape cancels and returns focus to the menu button
+    // delete: a destructive dialog opens on its least destructive button (Cancel), Escape cancels and returns focus to the menu button
     await menuButton.focus();
     await page.keyboard.press('Enter');
     await page.keyboard.press('End');
     await page.keyboard.press('Enter');
     const dialog = page.getByRole('dialog', { name: 'Delete this entry?' });
     await dialog.waitFor();
-    assert.equal(await focusedName(page), 'Delete entry');
+    assert.equal(await focusedName(page), 'Cancel', 'the dialog does not open on the destructive button');
     // the page behind a modal dialog is inert: Tab can only reach the dialog (or leave the document for the browser's own UI)
     for (let i = 0; i < 4; i += 1) {
       await page.keyboard.press('Tab');
@@ -136,7 +140,19 @@ describe('keyboard only', () => {
     await page.keyboard.press('End');
     await page.keyboard.press('Enter');
     await dialog.waitFor();
-    await page.keyboard.press('Enter'); // the focused confirm button
+    // a stray Enter or Space on a freshly opened dialog only cancels it
+    await page.keyboard.press('Enter');
+    await dialog.waitFor({ state: 'hidden' });
+    assert.ok(db.entries.get(id), 'Enter on the opening focus (Cancel) deleted nothing');
+    assert.equal(await focusedName(page), 'Entry options');
+
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('End');
+    await page.keyboard.press('Enter');
+    await dialog.waitFor();
+    await page.keyboard.press('Tab'); // Cancel -> Delete entry
+    assert.equal(await focusedName(page), 'Delete entry');
+    await page.keyboard.press('Enter'); // the person chose it on purpose
     await page.getByText('Entry deleted').waitFor();
     await page.waitForURL(/#\/history/);
     assert.equal(db.entries.get(id), null);
@@ -157,6 +173,8 @@ describe('keyboard only', () => {
     await title.fill('A better title');
     await page.keyboard.press('Enter');
     await eventually(() => assert.equal(db.entries.get(id).title, 'A better title'));
+    // (the page learns the saved title when the server's answer arrives; Escape below reverts to that)
+    await eventually(async () => assert.equal(await page.title(), 'A better title · MyJournal'), { message: 'the saved title to reach the page' });
     assert.notEqual(await focusedName(page), 'Entry title');
     await title.focus();
     await title.fill('Never saved');
@@ -206,7 +224,7 @@ describe('keyboard: focus and order', () => {
     name: 'keyboard-focus-audit', seed: (db) => seedSampleJournal(db),
   }, async (j) => {
     const { page, db } = j;
-    // an entry that already has the companion's reply last (so there is no "Get a reply" button; see the BUG test below)
+    // an entry that already has the companion's reply last (so there is no "Get a reply" button; that one has its own test below)
     const entry = db.entries.list({ limit: 50 }).find((e) => e.title === 'Long run in the rain');
     const routes = [
       ['/', 'Write a new journal entry'],
@@ -229,10 +247,10 @@ describe('keyboard: focus and order', () => {
     }
   }));
 
-  // Confirmed in the browser: opening an older entry whose last message is the person's own shows "Get a reply" at the
-  // bottom of the thread, directly under the fixed composer. Tab focuses it without scrolling (it is "in view"), so the
-  // focused button is hidden behind the composer (WCAG 2.2 "Focus Not Obscured").
-  test('Tab to "Get a reply" is not hidden behind the composer', { skip: 'BUG: entry page - the fixed composer covers a focused "Get a reply" button (no scroll-padding-bottom for the dock); fix: html { scroll-padding-bottom: <dock height> } on the entry page' }, () => journey({
+  // Regression: on an older entry whose last message is the person's own, "Get a reply" sits at the bottom of the thread right
+  // under the fixed composer. Tab focused it without scrolling (it was "in view") so it was hidden behind the composer
+  // (WCAG 2.2 "Focus Not Obscured"); the page now keeps scroll padding for the composer's height.
+  test('Tab to "Get a reply" is not hidden behind the composer', () => journey({
     name: 'keyboard-get-a-reply-obscured', seed: (db) => seedSampleJournal(db),
   }, async (j) => {
     const { page, db } = j;
@@ -267,9 +285,9 @@ describe('keyboard: focus and order', () => {
     assert.match(page.url(), /#\/history$/, 'the address is not changed by the skip link');
   }));
 
-  // Confirmed in the browser: the five mood buttons are role="radio" in a role="radiogroup", but every one is its own Tab
-  // stop and the arrow keys do nothing - radio semantics promise the opposite (one stop, arrows move and select).
-  test('the mood picker behaves like a radio group with the arrow keys', { skip: 'BUG: moodPicker (public/js/lib/ui.js) - role=radio buttons are all Tab stops and ArrowRight/ArrowLeft do nothing; implement roving tabindex + arrow keys, or drop the radio roles' }, () => journey({
+  // Regression: the five mood buttons are role="radio" in a role="radiogroup", but every one used to be its own Tab stop and the
+  // arrow keys did nothing. Radio semantics promise one stop, with the arrows moving and choosing.
+  test('the mood picker behaves like a radio group with the arrow keys', () => journey({
     name: 'keyboard-mood-arrows',
   }, async (j) => {
     const { page } = j;

@@ -82,6 +82,26 @@ export function envKeyName(providerId) {
 }
 
 /**
+ * Providers whose API key the server found in its own environment, from the rows of GET /api/providers
+ * (`keySource: 'env'`). Only the variable's name is returned, never anything about the key itself. Providers that
+ * need no key (the local model) are left out: an optional LOCAL_LLM_API_KEY is not news to anybody.
+ * @param {{ id?: string, needsKey?: boolean, keySource?: string }[]} rows
+ * @returns {Record<string, string>} e.g. { gemini: 'GEMINI_API_KEY' }
+ */
+export function envKeysFound(rows) {
+  const found = {};
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (row && PROVIDER_IDS.includes(row.id) && row.needsKey !== false && row.keySource === 'env') found[row.id] = envKeyName(row.id);
+  }
+  return found;
+}
+
+/** The badge on a welcome card: "Found GEMINI_API_KEY in your environment". */
+export function envKeyBadgeText(providerId) {
+  return `Found ${envKeyName(providerId)} in your environment`;
+}
+
+/**
  * How to describe the API key situation without ever showing a key.
  * @param {{ apiKeySet?: boolean, apiKeyHint?: string, apiKeySource?: string }} saved public provider settings
  * @param {string} providerId
@@ -239,6 +259,22 @@ export function mergeModelOptions(suggested, loaded) {
     out.push({ id: m.id, label: m.label || m.id });
   }
   return out;
+}
+
+/**
+ * Is `model` one of the models a server reported as installed? Ollama lists an untagged download as "name:latest", so
+ * "llama3.2" counts as "llama3.2:latest". Names are compared as written otherwise (a tag is part of the identity).
+ * @param {string} model the name in the form
+ * @param {{ id: string }[]} loaded rows from POST /providers/models
+ */
+export function isModelInstalled(model, loaded) {
+  const name = String(model || '').trim().toLowerCase();
+  if (!name || !Array.isArray(loaded)) return false;
+  const wanted = name.includes(':') ? name : `${name}:latest`;
+  return loaded.some((m) => {
+    const id = m && typeof m.id === 'string' ? m.id.trim().toLowerCase() : '';
+    return id === name || id === wanted;
+  });
 }
 
 const SMALL_MODELS = {
@@ -535,8 +571,16 @@ export function describeImportResult(result) {
 }
 
 /* ----------------------------------------------------------------- setup */
-/** The two next steps shown on the onboarding banner (`setup=1`). */
-export function setupSteps(providerId) {
+/**
+ * The next steps shown on the onboarding banner (`setup=1`). With a key that the server found in its environment there is
+ * nothing to paste and nothing to save: one step is left, pressing Test connection.
+ * @param {string} providerId
+ * @param {{ keyFromEnv?: boolean }} [opts]
+ */
+export function setupSteps(providerId, { keyFromEnv = false } = {}) {
+  if (keyFromEnv && providerId !== 'local') {
+    return [`MyJournal found your key in ${envKeyName(providerId)}, so there is nothing to paste. Press Test connection to check it.`];
+  }
   if (providerId === 'gemini') {
     return ['Create a free key in Google AI Studio and paste it below.', 'Press Test connection, then Save.'];
   }

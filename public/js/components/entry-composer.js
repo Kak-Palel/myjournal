@@ -45,7 +45,11 @@ export function createComposer({ entryId, aiReady, hasMessages, handlers }) {
   const stop = h('button', { type: 'button', class: 'btn entry-btn-stop', onClick: () => handlers.stop() }, icon('stop', { size: 18 }), h('span', null, 'Stop'));
   const send = h('button', { type: 'button', class: 'btn btn-primary entry-btn-send', onClick: () => handlers.send() }, icon('send', { size: 18 }), h('span', null, 'Send'));
   const save = h('button', { type: 'button', class: 'btn entry-btn-save', onClick: () => handlers.save() }, h('span', { class: 'entry-long' }, 'Save without reply'), h('span', { class: 'entry-short', 'aria-hidden': 'true' }, 'Save'));
-  const wrap = h('button', { type: 'button', class: 'btn btn-ghost entry-btn-wrap', onClick: () => handlers.wrapUp(), title: 'Finish this entry: get a closing reflection, a title and a summary' }, icon('sparkles', { size: 18 }), h('span', null, 'Wrap up'));
+  // "Wrap up again" would not fit next to Save and Send on a phone: the " again" is dropped from the visible label there
+  // (CSS), the accessible name keeps it (aria-label), and the label is never cut off with an ellipsis.
+  const wrapLabel = h('span', { class: 'entry-wrap-label' }, 'Wrap up');
+  const wrapAgain = h('span', { class: 'entry-wrap-again' }, ' again');
+  const wrap = h('button', { type: 'button', class: 'btn btn-ghost entry-btn-wrap', onClick: () => handlers.wrapUp(), title: 'Finish this entry: get a closing reflection, a title and a summary' }, icon('sparkles', { size: 18 }), wrapLabel);
 
   const voice = createVoiceButton({
     textarea,
@@ -109,7 +113,9 @@ export function createComposer({ entryId, aiReady, hasMessages, handlers }) {
     send.querySelector('span').textContent = busy === 'posting' ? 'Sending…' : 'Send';
     wrap.disabled = !canWrap || !idle;
     wrap.classList.toggle('is-loading', busy === 'wrapping');
-    wrap.querySelector('span').textContent = busy === 'wrapping' ? 'Wrapping up…' : wrapped ? 'Wrap up again' : 'Wrap up';
+    const again = wrapped && busy !== 'wrapping';
+    wrapLabel.textContent = busy === 'wrapping' ? 'Wrapping up…' : 'Wrap up';
+    if (again) { wrapLabel.append(wrapAgain); wrap.setAttribute('aria-label', 'Wrap up again'); } else wrap.removeAttribute('aria-label');
     el.classList.toggle('is-busy', !idle);
     textarea.placeholder = messagesPresent ? 'Keep writing…' : 'What is on your mind?';
   }

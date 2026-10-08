@@ -128,7 +128,7 @@ html {
   -webkit-text-size-adjust: 100%;
   /* Keyboard focus and "scroll into view" must never end up behind the floating writing box (--dock-h, set by the entry view)
      or the bottom tab bar (WCAG 2.4.11). */
-  scroll-padding-bottom: calc(var(--dock-h, 0px) + 1rem);
+  scroll-padding-bottom: calc(var(--dock-h, 0px) + var(--kb-inset, 0px) + 1rem);
 }
 body {
   margin: 0;
@@ -195,7 +195,7 @@ img, svg { max-width: 100%; }
 .shell.is-bare .sidebar, .shell.is-bare .tabbar { display: none; }
 
 @media (max-width: 899px) {
-  html { scroll-padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + var(--dock-h, 0px) + 1rem); }
+  html { scroll-padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + var(--dock-h, 0px) + var(--kb-inset, 0px) + 1rem); }
   .shell { grid-template-columns: minmax(0, 1fr); padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); }
   .sidebar { display: none; }
   .view { padding: 1.25rem 1rem 2rem; }

@@ -15,6 +15,7 @@ A journal is about the most personal text you will ever write, so this page says
 
 - Your journal is **one SQLite file on the computer that runs MyJournal**. There is no MyJournal server, no account, no analytics, no telemetry and no update check. The web page loads nothing from other sites.
 - Text leaves your computer **only when you ask the AI companion for something**, and **only to the model provider you chose**. With a local model on the same computer, nothing leaves it at all. With the AI off, nothing leaves it.
+- **Private entries still go to your AI provider when you ask for a reply in them.** The Private flag keeps an entry out of memory, recall and weekly reflections; it does not keep it from the model you are chatting with. **Save without reply** does. See [Private entries](#private-entries).
 - **Your API keys are stored unencrypted** in that same file if you paste them in Settings. Keys supplied through environment variables are never written to it.
 - There is **no encryption at rest** and the app has **one user**. It is built for a computer you control; see the [threat model](#threat-model).
 
@@ -24,7 +25,7 @@ A journal is about the most personal text you will ever write, so this page says
 |---|---|---|
 | Entries, your messages, the companion's replies, memories, weekly reflections, settings | `journal.db` in the data folder (`./data` by default, or `JOURNAL_DATA_DIR`), plus `journal.db-wal` / `journal.db-shm` while the server runs | A folder the app creates is readable by you only (mode 700, file 600). A full-text search index of your own writing lives in the same file. |
 | API keys saved in Settings | the `settings` table of `journal.db` | **Unencrypted.** Never included in exports, never returned by the API (the app only sees "a key is set" and its last four characters), never written to logs or error messages. |
-| Keys and passwords from the environment | the process environment only | Not written to the database. |
+| Keys and passwords from the environment | the process environment only | Not written to the database. The welcome screen asks your own MyJournal server which keys it found, so it can say "Found GEMINI_API_KEY in your environment": only the name of the variable ever reaches the browser, never the key. |
 | Session login (only when `JOURNAL_PASSWORD` is set) | memory of the server; a cookie in your browser | The cookie `mj_session_<port>` is HTTP-only and same-site; the server keeps only a hash of its random token. A restart forgets all sessions. |
 | Small preferences and unsent drafts | your browser's local storage on that device | Theme, the Insights range you picked, a dismissed nudge, and a draft of what you are typing (`mj-draft:…`), removed once the text is saved. Clear the site's data to remove any of it. |
 | Logs | the terminal that runs the server | One line per request: method, path, status code and duration. Never bodies, headers, keys or query strings (so a search term is not logged). |
@@ -68,7 +69,7 @@ The **Dictate** button uses your browser's built-in speech recognition. That is 
 
 - **Links.** A few help links (for example "get a key" at aistudio.google.com) open in a new tab only when you click them.
 - **Updates and telemetry.** None. `npm start` makes no request on its own.
-- **Fonts, scripts, images, maps.** All served from your own MyJournal; none from other sites.
+- **Fonts, scripts, images, maps.** All served from your own MyJournal; none from other sites. (Every browser test fails on a request to any other origin, and on any Content-Security-Policy violation.)
 
 ## What the AI sees, request by request
 
@@ -76,13 +77,13 @@ Only a request you trigger sends text. What each one contains:
 
 | You do | The model receives |
 |---|---|
-| Press **Send** (a reply) | A system prompt with the companion's style and rules, today's date, your name and "About you" text, your memories (if memory is on), up to 4 related older entries, 2 for a local model (title and summary or an excerpt; only if recall is on and this entry is not private), the guided session's instructions (guided journals only), the mood you logged for this entry, and the conversation of this entry, shortened to your context budget (default about 3,000 tokens). |
-| Press **Wrap up** | The same again for the closing reflection. Then one small request with only what *you* wrote in the entry, for the title, summary, feelings and tags; then (unless the entry is private, or memory or auto-extract is off) one with what you wrote plus up to 12 of your existing memories, to find new lasting facts. |
+| Press **Send** (a reply) | A system prompt with the companion's style and rules, today's date (the date on your computer, sent by your browser), your name and "About you" text, your memories (if memory is on), up to 4 related older entries, 2 for a local model (title and summary or an excerpt; only if recall is on and this entry is not private), the guided session's instructions (guided journals only), the mood you logged for this entry, and the conversation of this entry, shortened to your context budget (default about 3,000 tokens). This is the same list that Settings → Data shows. |
+| Press **Wrap up** | The same again for the closing reflection, with a short closing request as the last line (in your language, when it can tell). Then one small request with only what *you* wrote in the entry (and, for a guided session, its name), for the title, summary, feelings and tags; then (unless the entry is private, or memory or auto-extract is off) one with what you wrote plus up to 12 of your existing memories, to find new lasting facts. |
 | Press **Write my reflection** (weekly) | For each of up to 200 non-private entries in the period: date, title, summary (or the first 300 characters or so of what you wrote when there is no summary), mood, feelings and tags, plus your memories, name and "About you" text. |
 | **Test connection** | The words "Reply with the single word: OK". No journal text. |
 | **Load models** | Nothing but the request for the list (the key is sent). |
 
-The AI never receives: other entries beyond the related ones above, your settings, other providers' keys, your password, or private entries (except the conversation of a private entry you chat in, see below). Your writing is sent as is: names, places and anything else in it included.
+The AI never receives: other entries beyond the related ones above, your settings, other providers' keys, your password, or private entries (the one exception: the conversation of a private entry you ask for a reply in, see below). Your writing is sent as is: names, places and anything else in it included.
 
 ## Private entries
 
@@ -92,7 +93,7 @@ Mark an entry **Private** (the lock in the entry's menu) and it is **kept out of
 - the "related past entries" that are shown to the model while it replies, both in this entry and as a source for other entries,
 - weekly reflections.
 
-It is **not** kept away from the AI in the entry itself: if you press Send in a private entry, the conversation of that entry goes to your provider like any other. For text no model should see, use **Save without reply**, or switch the AI off. Private entries still appear in your own history, search, insights counts and exports.
+It is **not** kept away from the AI in the entry itself: if you press Send in a private entry, or Regenerate or Wrap up, the conversation of that entry goes to your provider like any other, and the reply is written by that provider (a wrap-up in a private entry also still sends your text for the title and summary; only the memory step is skipped). (The app says so in the entry menu, in the Private tag's tooltip and on the Memory page: "Replies in a private entry are still written by your AI provider; use Save without reply to keep text away from it.") For text no model should see, use **Save without reply**, or switch the AI off. Private entries still appear in your own history, search, insights counts and exports.
 
 ## Threat model
 
@@ -118,7 +119,7 @@ MyJournal is meant for **one person who controls the computer it runs on**.
 
 1. **Use a local model** for anything sensitive. Nothing leaves your computer.
 2. If you use a cloud model, **prefer a paid, billing-enabled key** over the free tier, and read the provider's retention policy.
-3. **Use Private entries and Save without reply** for text the AI should not touch, or turn the AI off for a while.
+3. **Use Save without reply** for text the AI should not touch, or turn the AI off for a while. (The Private flag alone does not do this: it keeps an entry out of memory, recall and weekly reflections, but a reply you ask for in it is still written by your provider.)
 4. Keep API keys in **environment variables** instead of Settings, so they are never in the database file.
 5. **Encrypt the disk**, keep `data/` out of cloud-synced folders, and back it up somewhere you trust.
 6. Leave `HOST` at `127.0.0.1`. If you must serve it elsewhere: set `JOURNAL_PASSWORD` (long passphrase), put HTTPS in front, and publish the port on loopback only (the Docker Compose file does).

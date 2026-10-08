@@ -4,8 +4,8 @@
 import { h, mount } from '../lib/dom.js';
 import { api, ApiError } from '../lib/api.js';
 import { icon, toast, inlineCode } from '../lib/ui.js';
-import { ollamaCommands, describeSmallModel, pullProgress, describePullFailure } from './settings-logic.js';
-import { commandBlock, externalLink, notice, uid, handFocus } from './settings-ui.js';
+import { ollamaCommands, describeSmallModel, pullProgress, describePullFailure, isModelInstalled } from './settings-logic.js';
+import { commandBlock, externalLink, notice, uid, handFocus, setActionable } from './settings-ui.js';
 
 /**
  * Build the three extra blocks of the Local tab and attach them to the provider form's slots.
@@ -103,12 +103,21 @@ function buildDownload(form, signal) {
   const outcome = h('div', { class: 'settings-download-outcome', 'aria-live': 'polite' });
 
   const modelName = () => form.getValues().model.trim();
+  // Ollama's pull always contacts the registry, even for a model it already has, so with no internet it would fail on a model
+  // that is sitting right there. A model the server listed as installed gets a calm, inactive button instead. It is dimmed
+  // (aria-disabled), not disabled: the keyboard focus on it survives the model list arriving or a download finishing.
+  const installed = () => isModelInstalled(modelName(), form.getLoaded());
   function paintButton() {
     const m = modelName();
-    mount(dlBtn, icon('download', { size: 16 }), m ? `Download ${m}` : 'Download model');
+    const have = installed() && !controller;
+    mount(dlBtn, icon(have ? 'check' : 'download', { size: 16 }), have ? 'Already installed' : m ? `Download ${m}` : 'Download model');
     dlBtn.disabled = !m || Boolean(controller);
+    setActionable(dlBtn, !have);
+    if (have) dlBtn.title = `${m} is already on this server. To fetch a newer version, run the download command from the quick start in a terminal.`;
+    else dlBtn.removeAttribute('title');
   }
   form.onValues(paintButton);
+  form.onLoaded(paintButton);
   paintButton();
   signal.addEventListener('abort', () => { if (controller) controller.abort(); }, { once: true });
 
@@ -133,7 +142,7 @@ function buildDownload(form, signal) {
 
   async function start() {
     const model = modelName();
-    if (!model || controller) return;
+    if (!model || controller || installed()) return;
     controller = new AbortController();
     latest = null;
     mount(outcome);

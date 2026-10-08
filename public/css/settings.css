@@ -27,6 +27,7 @@
 .settings-status-model { color: var(--text-muted); overflow-wrap: anywhere; }
 .settings-banner { margin-bottom: 1rem; }
 .settings-banner-steps { margin: 0.35rem 0; }
+.settings-banner-step { margin: 0.35rem 0; }
 
 /* ------------------------------------------------------------------- tabs */
 .settings-tabs { margin: 1.1rem 0 1.25rem; border-bottom: 1px solid var(--border); }
@@ -93,7 +94,8 @@
 .settings-keystatus { margin: 0; display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.875rem; color: var(--text-muted); }
 .settings-keystatus[data-kind="saved"], .settings-keystatus[data-kind="env"] { color: var(--success); }
 .settings-model-line { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
-.settings-model-line .input { flex: 1 1 200px; min-width: 0; }
+/* 15rem: a model name such as gemini-flash-lite-latest needs about 11rem of text plus padding; with less the end was cut off next to "Load models" at 375-390 px */
+.settings-model-line .input { flex: 1 1 15rem; min-width: 0; }
 .settings-presets { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .settings-suggest { display: flex; flex-direction: column; gap: 0.3rem; }
 .settings-pill {
@@ -183,10 +185,10 @@
 .settings-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; padding-top: 0.25rem; }
 .settings-actions-state { min-height: 24px; }
 /* Save stays focusable when there is nothing to save (see setActionable), so it needs its own dimmed look. */
-.settings-actions .btn[aria-disabled='true'] { opacity: 0.6; cursor: not-allowed; }
-.settings-actions .btn[aria-disabled='true']:hover { background: var(--surface); }
+.settings-actions .btn[aria-disabled='true'], .settings-download .btn[aria-disabled='true'] { opacity: 0.6; cursor: not-allowed; }
+.settings-actions .btn[aria-disabled='true']:hover, .settings-download .btn[aria-disabled='true']:hover { background: var(--surface); }
 .settings-actions .btn-primary[aria-disabled='true']:hover { background: var(--primary); border-color: var(--primary); }
-.settings-actions .btn[aria-disabled='true']:active { transform: none; }
+.settings-actions .btn[aria-disabled='true']:active, .settings-download .btn[aria-disabled='true']:active { transform: none; }
 .settings-dirty { display: inline-flex; align-items: center; gap: 0.45rem; font-size: 0.875rem; font-weight: 600; color: var(--settings-dirty); }
 .settings-dirty-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
 .settings-summary:not([hidden]) { display: block; }

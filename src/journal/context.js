@@ -15,7 +15,7 @@
 
 import { resolvePersonaPrompt } from './personas.js';
 import { getTemplate, templateStep } from './templates.js';
-import { MEMORY_EXAMPLES, META_EXAMPLE } from './tasks.js';
+import { LOCALIZED, detectLanguage } from './language.js';
 import { MESSAGE_OVERHEAD_TOKENS, estimateTokens } from './tokens.js';
 import {
   cleanText, normalizeLabels, oneLine, truncate, truncateMiddle,
@@ -33,6 +33,8 @@ const RELATED_BLOCK_CAP = 700;
 const MIN_LAST_USER_TOKENS = 24;
 const MAX_MEMORY_CHARS = 200;
 const MAX_WEEKLY_ENTRIES = 200;
+const DROP_BLOCKS = [8, 4, 2]; // turns dropped at a time from the start of a long conversation, for local providers (see buildConversation)
+const MIN_STOPPED_CHARS = 20;
 
 const MOOD_LABELS = Object.freeze({ 1: 'Awful', 2: 'Low', 3: 'Okay', 4: 'Good', 5: 'Great' });
 
@@ -60,78 +62,117 @@ export const TASK_SAMPLING = Object.freeze({
  * @property {boolean} [endsWithAssistant] (reply) the conversation ends with an assistant turn: nothing to reply to
  * @property {boolean} [noMessages] the conversation had no usable message
  * @property {{n: number, total: number, done: boolean}} [step] guided-session position for the reply being written
+ * @property {boolean} [cue] (wrap-up) the closing cue was added to the prompt
+ * @property {string|null} [language] (reply, wrap-up) code of the language named in the rules (`detectLanguage`), null when unclear
  */
 
 // ------------------------------------------------------------------------------------------------
 // Rules (the shared rule set; personas only add voice)
 
-const REPLY_RULES = [
+// "Write in Spanish, the language the user writes in." beats "Write in the language the user writes in." on small models:
+// measured on llama3.2:1b and qwen3:1.7b, 32 of 34 and 26 of 34 replies stayed in the user's language with the neutral
+// wording, 34 of 34 and 34 of 34 with the language named (qwen3:1.7b answered Spanish, French and Japanese entries in
+// English 15 times in 85 without). The name comes from detectLanguage(); without a clear guess the neutral wording is used.
+// English keeps the neutral wording too: naming it made qwen3:1.7b write two questions more often (72 of 85 replies ended
+// with exactly one, 81 of 85 without), and an English reply to an English entry needs no help.
+const languageRule = (language) => (language && language.code !== 'en' ? `Write in ${language.name}, the language the user writes in.` : 'Write in the language the user writes in.');
+const languageShort = (language) => (language && language.code !== 'en' ? `Write in ${language.name}.` : "Use the user's language.");
+
+const BACKGROUND_RULE = '- Profile notes, memories and earlier entries are background: mention one only when it directly relates to what the user just wrote.';
+const NO_INVENTING_RULE = '- Do not invent details (times, places, events) that the user did not mention.';
+
+const replyRules = (language) => [
   'Rules, always follow them:',
   '- Reply in 2 to 4 short sentences of plain prose. No lists or headings unless the user asks for them.',
   '- Respond to what the user just wrote, then ask exactly ONE open follow-up question. Your last sentence is that question.',
-  '- Write in the language the user writes in.',
+  `- ${languageRule(language)}`,
   "- Do not diagnose, label conditions or give orders. Do not repeat the user's text back; add something new.",
+  BACKGROUND_RULE,
+  NO_INVENTING_RULE,
   '- Do not bring up being an AI unless asked. Never claim to be human.',
   '- If the user may be in danger or wants to end their life: answer with warmth, take it seriously, encourage them to reach someone they trust or a local emergency or crisis line, and do not lecture.',
 ].join('\n');
 
-const REPLY_RULES_COMPACT = [
+const replyRulesCompact = (language) => [
   'Rules:',
   '- 2 to 4 short sentences of plain prose, no lists.',
   '- Then ask exactly ONE open question. End with it.',
-  "- Use the user's language. No diagnosing. Never claim to be human.",
+  `- ${languageShort(language)} No diagnosing. Never claim to be human.`,
+  '- Mention background notes only when they directly relate. Invent nothing.',
   '- If the user may be in danger, be warm and point to a trusted person or a local crisis line.',
 ].join('\n');
 
-const WRAPUP_RULES = [
+const wrapupRules = (language) => [
   'The session is ending now. Do not continue the conversation or answer the last message: write a short closing reflection instead.',
   'Rules, always follow them:',
   '- Write 3 to 5 sentences of plain prose. No lists or headings. Do not ask a question.',
-  '- Name what the user seemed to feel and one specific thing they wrote that stood out.',
+  '- Speak to the user as "you", like a companion. Never write as if you were the user.',
+  '- Name what the user seemed to feel and one specific thing they wrote in this conversation that stood out.',
   '- Point out a strength or an insight you noticed. Be honest, not flattering.',
-  '- If a past entry genuinely connects, mention it briefly.',
+  '- Profile notes, memories and earlier entries are background: mention one only when it clearly connects. Call an earlier entry an earlier entry, and never present background as something the user said today.',
+  NO_INVENTING_RULE,
   '- End with a kind closing line or a small thought to carry forward.',
-  "- Use the user's language. Do not diagnose or give orders. Never claim to be human.",
+  `- ${languageRule(language)} Do not diagnose or give orders. Never claim to be human.`,
   '- If the user may be in danger or wants to end their life: answer warmly, encourage them to reach someone they trust or a local emergency or crisis line, and do not lecture.',
 ].join('\n');
 
-const WRAPUP_RULES_COMPACT = [
+const wrapupRulesCompact = (language) => [
   'The session is ending. Do not answer the last message directly: write a closing reflection.',
   '- 3 to 5 sentences, plain prose, no lists, no question at the end.',
-  '- Name the main feeling and one specific thing they wrote. End kindly.',
-  "- Use the user's language. No diagnosing.",
+  '- Speak to the user as "you". Name the main feeling and one specific thing they wrote. End kindly.',
+  `- ${languageShort(language)} No diagnosing. Invent nothing.`,
 ].join('\n');
 
 /** Added to the system prompt when the caller's crisis detection fired: a 1B model may ignore the generic rule. */
 const CRISIS_LINE = 'The user may be in real distress right now. Put care first: acknowledge their pain, take it seriously, and gently encourage them to reach someone they trust or a local emergency or crisis line. Do not lecture and do not give advice.';
 
-/** Final user turn added when a wrap-up is requested and the conversation ends with an assistant turn. */
-export const WRAPUP_CUE = "That's all for now. Please write your closing reflection, in the language I have been writing in.";
+/**
+ * The last user turn of a closing-reflection prompt when the language is unknown. With a known language the same cue is
+ * used in that language (`closingCue`). Measured on llama3.2:1b with Spanish, French and Japanese entries: the English cue
+ * kept the reflection in the entry's language in 0 of 8 tries, the cue in the entry's language in 8 of 8. The cue speaks as
+ * the user ("write ... to me, addressing me as you"), which is what turns "As I close this entry, I feel..." into a
+ * reflection about the user: 13 of 22 reflections from llama3.2:1b and 10 of 22 from qwen3:1.7b were in the wrong voice
+ * (the user's, or about "Sam" in the third person) before, 3 of 22 and 1 of 22 after.
+ */
+export const WRAPUP_CUE = `${LOCALIZED.en.closing} Use the language I have been writing in.`;
+
+/** @param {{code: string, name: string}|null} language @returns {string} */
+export function closingCue(language) {
+  if (language && LOCALIZED[language.code]) return LOCALIZED[language.code].closing;
+  return language ? `${LOCALIZED.en.closing} Write it in ${language.name}.` : WRAPUP_CUE;
+}
 
 const META_INTRO = [
   'TASK: meta',
   'You label a private journal entry so it can be found later.',
 ];
+// The format is shown with placeholders, not with an example: 1B models copy any example verbatim (llama3.2:1b copied it
+// in 15 of 17 entries). With placeholders alone 14 of 17 entries parsed without falling back; the reminder at the end of the
+// user message (META_TAIL) makes it 17 of 17.
 const META_BODY = [
   'Write a title of 2 to 6 words. Write a summary of one or two short sentences about what happened and how the writer felt, without using "I" or "you".',
   'Name 1 to 4 feelings and 1 to 4 topics, separated by commas.',
   'Use the language of the entry and only what the entry says.',
-  'Reply with exactly four lines in this format, and nothing else (this example is about a different entry):',
-  `Title: ${META_EXAMPLE.title}`,
-  `Summary: ${META_EXAMPLE.summary}`,
-  `Emotions: ${META_EXAMPLE.emotions}`,
-  `Tags: ${META_EXAMPLE.tags}`,
+  'Reply with exactly four lines, in this order, and nothing else:',
+  'Title: <2 to 6 words>',
+  'Summary: <one or two short sentences, without "I" or "you">',
+  'Emotions: <1 to 4 feelings, separated by commas>',
+  'Tags: <1 to 4 topics, separated by commas>',
 ];
+const META_TAIL = 'Now write the four lines (Title, Summary, Emotions, Tags) for this entry.';
 
 const MEMORY_SYSTEM = [
   'TASK: memory',
   'You find lasting facts about the writer in a private journal entry.',
   'A lasting fact is still true months from now: people in their life (name and relation), job or studies, where they live, hobbies, health conditions they mention, values, long-term goals, big life events.',
   'Do NOT include feelings, moods, what happened today, plans for the next days, opinions, advice or questions.',
-  'Write at most 3 facts, one per line, each starting with "- ". Use the third person, few words, and the language of the entry. Example:',
-  // parseMemoryLines drops these exact facts unless the entry mentions their distinctive word (see MEMORY_EXAMPLES).
-  ...MEMORY_EXAMPLES.map((example) => `- ${example.fact}`),
+  // No example facts: 1B models copy them (31 of 51 bullets from llama3.2:1b, 63 of 72 from smollm2:360m were the example).
+  'Write at most 3 facts, one per line, each starting with "- ". Write each fact as: - <short fact>. Use the third person and few words.',
 ].join('\n');
+
+const memoryLanguageLine = (language) => (language
+  ? `Write the facts in ${language.name}.`
+  : 'Write the facts in the same language as the entry.');
 
 const MEMORY_SYSTEM_END = 'If the entry has no new lasting fact, reply with exactly: none';
 
@@ -146,6 +187,18 @@ const WEEKLY_RULES = [
   'Keep it under 200 words. Warm and honest. No lists, no diagnosing, no medical advice.',
   "Use the language of the entries. Do not bring up being an AI.",
 ].join('\n');
+
+/**
+ * The closing instruction of the weekly prompt (last words of the user message). Seeded with the opening words of the
+ * reflection, in the entries' language: measured on llama3.2:1b and qwen3:1.7b, 4 of 8 and 7 of 8 weekly reflections
+ * were written as the user ("I felt...") or about "Sam" without it, 0 of 8 and 0 of 8 with it, in English and Spanish.
+ * The seed names no period ("This week, you" would be wrong for a 14 or 30 day report).
+ */
+function weeklyCue(language) {
+  const loc = language && LOCALIZED[language.code];
+  if (loc) return `Write my weekly reflection now, as my companion${language.code === 'en' ? '' : `, in ${language.name}`}. Start exactly with: "${loc.weeklyLead}"`;
+  return `Write my weekly reflection now, as my companion, speaking to me as "you", ${language ? `in ${language.name}` : 'in the language of my entries'}.`;
+}
 
 // ------------------------------------------------------------------------------------------------
 // Input normalisation
@@ -177,6 +230,8 @@ function prepareTurns(messages) {
     if (m.meta && m.meta.kind === 'safety') continue;
     const content = cleanText(m.content).trim();
     if (content === '') continue;
+    // A reply that was stopped after a word or two ("That") is not worth a turn: it only teaches the model to be abrupt.
+    if (m.role === 'assistant' && m.meta && m.meta.stopped === true && Array.from(content).length < MIN_STOPPED_CHARS) continue;
     const last = turns[turns.length - 1];
     if (last && last.role === m.role) {
       last.content += `\n\n${content}`;
@@ -315,11 +370,22 @@ const withTokens = (turn) => ({ ...turn, tokens: estimateTokens(turn.content) })
 // ------------------------------------------------------------------------------------------------
 // reply / wrap-up
 
-function contextLines({ nowDate, profile, entry, level }) {
+// What the person told the app about themselves is labelled as background in the text itself, next to the text. A rule far
+// below is not enough for a hosted model: Gemini Flash-Lite mentioned the cat of "Lives with a cat called Miso" in 5 of 17
+// replies about something else with the rules alone (4 of 5 on the conversations that had leaked), and in 0 of 26 with this
+// label. Small local models do not profit (llama3.2:1b: 14 of 85 replies before, 9 to 18 of 85 after) and write the
+// "exactly one question" reply less often with the longer labels (qwen3:1.7b: 80 of 85 replies with the plain labels, 72 of
+// 85 with these), so `lean` prompts (local providers) keep the plain ones.
+const aboutLine = (name, about, lean = false) => (lean
+  ? `About ${name || 'the user'}: ${about}`
+  : `Background about ${name || 'the user'} (do not mention it unless it is relevant): ${about}`);
+const knownBlock = (name, mems) => `Things you know about ${name || 'the user'}:\n${mems.map((m) => `- ${m.text}`).join('\n')}`;
+
+function contextLines({ nowDate, profile, entry, level, lean }) {
   const lines = [];
   if (nowDate) lines.push(`Today is ${formatLongDate(nowDate)}.`);
   if (profile.name && level !== 'minimal') lines.push(`The user's name is ${profile.name}.`);
-  if (profile.about && level === 'full') lines.push(`About ${profile.name || 'the user'}: ${profile.about}`);
+  if (profile.about && level === 'full') lines.push(aboutLine(profile.name, profile.about, lean));
   const mood = entry && Number.isInteger(entry.mood) ? MOOD_LABELS[entry.mood] : undefined;
   if (mood && level === 'full') lines.push(`Mood the user logged for this entry: ${mood} (${entry.mood} of 5).`);
   return lines;
@@ -330,6 +396,11 @@ function contextLines({ nowDate, profile, entry, level }) {
 const PERSONA_TOKENS = { full: 450, compact: 110, minimal: 40 };
 const GUIDANCE_TOKENS = { full: 200, compact: 70, minimal: 0 };
 
+// Past entries are found by a keyword search, so a hit can be about something else entirely (a measured wrap-up presented a
+// "wrong number in the report" from another entry as something the user said today). The header says how to use them.
+export const RELATED_HEADER = 'Possibly relevant past entries (background; mention one only if it clearly connects, and call it an earlier entry):';
+const RELATED_HEADER_LEAN = 'Possibly relevant past entries (use only if they genuinely connect):';
+
 function renderConversationSystem(task, c) {
   const { level } = c;
   const compact = level !== 'full';
@@ -337,10 +408,11 @@ function renderConversationSystem(task, c) {
 
   const ctx = contextLines(c).join('\n');
   if (ctx) parts.push(ctx);
-  if (c.mems.length > 0) parts.push(`Things you know about ${c.profile.name || 'the user'}:\n${c.mems.map((m) => `- ${m.text}`).join('\n')}`);
-  if (c.rels.length > 0) parts.push(`Possibly relevant past entries (use only if they genuinely connect):\n${c.rels.map((r) => `- ${r}`).join('\n')}`);
+  if (c.mems.length > 0) parts.push(knownBlock(c.profile.name, c.mems));
+  if (c.rels.length > 0) parts.push(`${c.lean ? RELATED_HEADER_LEAN : RELATED_HEADER}\n${c.rels.map((r) => `- ${r}`).join('\n')}`);
 
-  if (task === 'reply' && (c.template || c.guidance)) {
+  // `c.guidance` is always an object, so it must be its text that decides: a free-write prompt has none.
+  if (task === 'reply' && (c.template || c.guidance.full)) {
     const lines = [c.guidance[level] || (level === 'minimal' ? '' : 'This is a guided session.')];
     if (c.step) lines.push(c.step.text);
     const block = lines.filter(Boolean).join('\n');
@@ -349,8 +421,8 @@ function renderConversationSystem(task, c) {
     parts.push(`This session was a guided exercise: ${c.template.title}.`);
   }
 
-  const rules = task === 'wrapup' ? (compact ? WRAPUP_RULES_COMPACT : WRAPUP_RULES) : (compact ? REPLY_RULES_COMPACT : REPLY_RULES);
-  parts.push(rules);
+  const rules = task === 'wrapup' ? (compact ? wrapupRulesCompact : wrapupRules) : (compact ? replyRulesCompact : replyRules);
+  parts.push(rules(c.language));
   if (c.crisis) parts.push(CRISIS_LINE);
   return parts.join('\n\n');
 }
@@ -373,7 +445,23 @@ function buildConversation(task, args) {
   let turns = prepareTurns(messages);
   const endsWithAssistant = turns.length > 0 && turns[turns.length - 1].role === 'assistant';
   const userTurnCount = turns.filter((t) => t.role === 'user').length;
-  if (task === 'wrapup' && endsWithAssistant) turns.push({ role: 'user', content: WRAPUP_CUE, count: 0 });
+  // The language to name in the prompt: the latest user message, or (when that is too short to tell, like "ok") everything written.
+  const userContents = turns.filter((t) => t.role === 'user').map((t) => t.content);
+  const language = task === 'wrapup'
+    ? detectLanguage(userContents.join('\n\n'))
+    : detectLanguage(userContents[userContents.length - 1]) || detectLanguage(userContents.slice(-6).join('\n\n'));
+  let cueAdded = false;
+  if (task === 'wrapup' && turns.length > 0) {
+    const cue = closingCue(language);
+    if (endsWithAssistant) {
+      turns.push({ role: 'user', content: cue, count: 0 });
+    } else {
+      // The conversation ends with the user's own text: the cue goes at the end of that turn, so it is still the last thing read.
+      const last = turns[turns.length - 1];
+      turns[turns.length - 1] = { ...last, content: `${last.content}\n\n${cue}` };
+    }
+    cueAdded = true;
+  }
 
   // One enormous old message must not push every other turn out of the prompt.
   const maxOldTurnTokens = Math.max(150, Math.floor(budget * 0.45));
@@ -408,6 +496,8 @@ function buildConversation(task, args) {
     rels: useRelated ? selectRelated(related, { maxItems: limits.maxRelated, capTokens: limits.relatedCap, nowYear }) : [],
     level: 'full',
     crisis: crisis === true,
+    language,
+    lean: providerId === 'local',
   };
 
   // A system prompt that alone takes almost half the budget would starve the conversation: shorten it up front.
@@ -420,6 +510,7 @@ function buildConversation(task, args) {
   let first = 0; // index of the oldest turn that is still in the prompt
   let dropped = 0;
   let truncatedLast = false;
+  const blockwise = providerId === 'local';
   const fits = () => systemTokens + MESSAGE_OVERHEAD_TOKENS + turnTokens <= budget;
   const rerender = () => {
     system = renderConversationSystem(task, c);
@@ -454,6 +545,23 @@ function buildConversation(task, args) {
       break;
     }
   }
+  // Local servers (Ollama, llama.cpp) keep the processed prompt and only compute what is new. Dropping ONE old turn on every
+  // request moves the start of the history each time, so they process everything again (measured on llama3.2:1b, 30 turns:
+  // median reply 9 s and 14 % of the prompt reused once the budget was full, against 2.7 s and 76 % with blocks). So for
+  // them the first kept turn is rounded up to a multiple of a block size, counted from the start of the conversation: the
+  // same turns are kept for the next few requests and the cached prefix survives. The block is 8 turns when that costs at
+  // most 40 % of what fits, else 4 or 2 (a small budget must not lose most of its history). Only more is dropped: the
+  // budget is still honoured and the latest message is never touched.
+  if (blockwise && first > 0 && turns.length - first > 0) {
+    const fitting = turns.length - first;
+    const block = DROP_BLOCKS.find((b) => b - 1 <= fitting * 0.4) || 1;
+    const rounded = Math.min(turns.length - 1, Math.ceil(first / block) * block);
+    while (first < rounded) {
+      dropped += turns[first].count;
+      turnTokens -= turns[first].tokens + MESSAGE_OVERHEAD_TOKENS;
+      first += 1;
+    }
+  }
   turns = turns.slice(first);
 
   const out = [{ role: 'system', content: system }, ...turns.map(({ role, content }) => ({ role, content }))];
@@ -469,6 +577,8 @@ function buildConversation(task, args) {
     truncatedTurns,
     endsWithAssistant: task === 'reply' && endsWithAssistant,
     noMessages: turns.length === 0,
+    cue: cueAdded,
+    language: language ? language.code : null,
   };
   if (c.step) debug.step = { n: c.step.n, total: c.step.total, done: c.step.done };
   return { messages: out, debug };
@@ -503,8 +613,9 @@ export function buildReplyMessages(args) {
 
 /**
  * Prompt for the closing reflection of a session. Same inputs as buildReplyMessages(). The conversation is
- * sent as it stands; if it ends with an assistant turn, a short user turn (WRAPUP_CUE) is appended so every
- * provider gets a prompt that ends with a user message. Otherwise the last message is the user's latest text.
+ * sent as it stands, followed by the closing cue (closingCue(): in the user's language when `detectLanguage()` can tell,
+ * written as the user so that the reflection comes back addressed to them): if it ends with an assistant turn, the cue is
+ * a short user turn, so every provider gets a prompt that ends with a user message; otherwise it ends the user's last turn.
  * @param {object} args see buildReplyMessages
  * @returns {{messages: ChatMessage[], debug: BuildDebug}}
  */
@@ -515,12 +626,12 @@ export function buildWrapUpMessages(args) {
 // ------------------------------------------------------------------------------------------------
 // meta / memory: one system message and one user message that holds the writing
 
-function buildSingleUser({ system, header, bodyText, budget, emptyText }) {
+function buildSingleUser({ system, header, bodyText, tail = '', budget, emptyText }) {
   const body = bodyText === '' ? emptyText : bodyText;
-  const fixed = estimateTokens(system) + estimateTokens(header) + 2 * MESSAGE_OVERHEAD_TOKENS;
+  const fixed = estimateTokens(system) + estimateTokens(header) + estimateTokens(tail) + 2 * MESSAGE_OVERHEAD_TOKENS;
   const room = Math.max(MIN_LAST_USER_TOKENS, budget - fixed);
   const shrunk = shrinkToTokens(body, room);
-  const content = `${header}${shrunk.text}`;
+  const content = `${header}${shrunk.text}${tail}`;
   return { content, truncated: shrunk.truncated };
 }
 
@@ -531,7 +642,8 @@ function guidedLine(entry) {
 
 /**
  * Prompt for the `meta` task (title, summary, emotions, tags). The user message is `Journal entry:` followed by
- * everything the user wrote (assistant turns are left out); when it does not fit the budget the middle is cut.
+ * everything the user wrote (assistant turns are left out), then a one-line reminder of the format (and, for a non-English
+ * entry, of its language); when the entry does not fit the budget its middle is cut.
  * The model is asked for the four labelled lines that parseMeta() reads.
  * @param {{entry?: object, messages: object[], settings?: object}} args `entry.templateId` adds one line of context
  * @returns {{messages: ChatMessage[], debug: BuildDebug}}
@@ -541,7 +653,12 @@ export function buildMetaMessages({ entry, messages, settings } = {}) {
   const guided = guidedLine(entry);
   const system = [...META_INTRO, ...(guided ? [guided] : []), ...META_BODY].join('\n');
   const text = userTexts(messages).join('\n\n');
-  const { content, truncated } = buildSingleUser({ system, header: 'Journal entry:\n\n', bodyText: text, budget, emptyText: '(empty entry)' });
+  // The reminder after the entry is what makes a 1B model write the four lines instead of repeating the format (see META_BODY).
+  // Naming a non-English language keeps title and summary in it (qwen3:1.7b answered 4 of 4 non-English entries in English
+  // without); the labels stay English because parseMeta reads them.
+  const language = detectLanguage(text);
+  const tail = `\n\n${META_TAIL}${language && language.code !== 'en' ? ` Keep the four labels in English and write the rest in ${language.name}.` : ''}`;
+  const { content, truncated } = buildSingleUser({ system, header: 'Journal entry:\n\n', bodyText: text, tail, budget, emptyText: '(empty entry)' });
   const out = [{ role: 'system', content: system }, { role: 'user', content }];
   return {
     messages: out,
@@ -568,10 +685,11 @@ export function buildMemoryMessages({ entry, messages, existingMemories, setting
   const budget = readBudget(settings);
   const text = userTexts(messages).join('\n\n');
   const known = selectMemories(existingMemories, { maxItems: 12, capTokens: Math.min(300, Math.floor(budget * 0.15)) });
+  const languageLine = memoryLanguageLine(detectLanguage(text));
   const render = () => {
     const parts = [MEMORY_SYSTEM];
     if (known.length > 0) parts.push(`Already known, do not repeat:\n${known.map((m) => `- ${m.text}`).join('\n')}`);
-    parts.push(MEMORY_SYSTEM_END);
+    parts.push(languageLine, MEMORY_SYSTEM_END);
     return parts.join('\n');
   };
   let system = render();
@@ -647,7 +765,8 @@ function weeklyOverview(rows) {
  * `summary` is preferred; `excerpt` (the start of what the user wrote) is used for entries that were never wrapped up.
  * `memories`: `{ text, pinned? }[]` or strings (optional personal context). `periodStart` / `periodEnd`:
  * `YYYY-MM-DD` (inclusive); derived from the entries when missing. At most the newest 200 entries are considered.
- * The user message lists one line per entry, oldest first, so the newest entry is last. To fit the budget it first
+ * The user message lists one line per entry, oldest first, and ends with the instruction to write the reflection, seeded
+ * with its first words in the entries' language (see weeklyCue). To fit the budget it first
  * drops memories, then the persona text, then shortens every entry's text, then drops the oldest entries.
  * @param {{entries: object[], memories?: object[], settings?: object, periodStart?: string, periodEnd?: string}} args
  * @returns {{messages: ChatMessage[], debug: BuildDebug & {entriesUsed: number}}}
@@ -686,15 +805,18 @@ export function buildWeeklyMessages({
     if (includePersona) parts.push(persona);
     const who = [];
     if (profile.name) who.push(`The user's name is ${profile.name}.`);
-    if (about && includeAbout) who.push(`About ${profile.name || 'the user'}: ${about}`);
+    if (about && includeAbout) who.push(aboutLine(profile.name, about));
     if (who.length > 0) parts.push(who.join('\n'));
-    if (mems.length > 0) parts.push(`Things you know about ${profile.name || 'the user'}:\n${mems.map((m) => `- ${m.text}`).join('\n')}`);
+    if (mems.length > 0) parts.push(knownBlock(profile.name, mems));
     parts.push(WEEKLY_RULES);
     return parts.join('\n\n');
   };
+  // The language of what the user wrote (titles and summaries), not of the app's own "mood 3/5" labels.
+  const language = detectLanguage(rows.map((r) => `${r.title}. ${r.body}`).join('\n'));
+  const cue = weeklyCue(language);
   const renderUser = () => {
     const lines = rows.length > 0 ? rows.map((r) => weeklyEntryLine(r, bodyChars)) : ['(no entries)'];
-    return `${period()}:\n${weeklyOverview(rows)}\n\n${lines.join('\n')}`;
+    return `${period()}:\n${weeklyOverview(rows)}\n\n${lines.join('\n')}\n\n${cue}`;
   };
 
   let system = renderSystem();

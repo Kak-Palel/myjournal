@@ -24,6 +24,16 @@ export function createSettingsStore(ctx) {
   }
 
   /**
+   * Has a settings document been saved yet? False on a fresh install (and again after "delete everything" with
+   * settings included, or when the stored document is unreadable), true from the first save on. The server uses it
+   * to let the environment's URL/model seeds (OPENAI_BASE_URL, LOCAL_LLM_*) start a fresh install only.
+   * @returns {boolean}
+   */
+  function exists() {
+    return isObject(readRaw());
+  }
+
+  /**
    * The internal settings (raw API keys included; never send these to a client): stored document
    * normalised and merged over the defaults. Returns a fresh object each time.
    */
@@ -54,5 +64,5 @@ export function createSettingsStore(ctx) {
     return next;
   }
 
-  return { get, set };
+  return { get, set, exists };
 }

@@ -33,7 +33,8 @@ export function clearGeminiQuirks() {
 
 const BLOCKING_FINISH = new Set(['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII', 'IMAGE_SAFETY', 'RECITATION']);
 // models.list returns dozens of ids that are not chat models, and retired models that 404 (those are handled at
-// request time). Allow-list first, then drop the known non-chat families (docs/ARCHITECTURE.md, live-verified item 4).
+// request time). Allow-list first, then drop the known non-chat families
+// (docs/ARCHITECTURE.md section 9, Gemini adapter: listModels).
 const MODEL_ALLOW = /^(gemini|gemma)-/;
 const MODEL_EXCLUDE = /embed|aqa|imagen|veo|tts|image|banana|live|audio|transcribe|omni|robotics|computer-use|customtools|learnlm|lyria/;
 
@@ -101,7 +102,7 @@ export function buildGeminiContents(messages, { foldSystem = false } = {}) {
  *  - `auto` (default): never send one.
  *  - `low`: `{ thinkingLevel: 'low' }` (accepted by 3.x models), then none if the API objects.
  * `thinkingBudget: 0` and `thinkingLevel: 'minimal'` are never sent: the live API rejects them on current models
- * (docs/ARCHITECTURE.md, live-verified item 2).
+ * (docs/ARCHITECTURE.md section 9, Gemini adapter: thinking).
  * @param {'auto'|'low'} mode
  * @returns {(object|null)[]}
  */

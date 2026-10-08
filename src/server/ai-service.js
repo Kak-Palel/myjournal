@@ -45,14 +45,29 @@ export function getProvider(settings, env, { fetch: fetchImpl } = {}) {
 }
 
 /**
+ * The settings in force: the saved document, or on a FRESH install (nothing saved yet) the defaults with the
+ * environment's URL/model seeds (OPENAI_BASE_URL, LOCAL_LLM_BASE_URL, LOCAL_LLM_MODEL) applied. The first Save writes
+ * the seeds into the document along with everything else (PUT merges over this result), so from then on the
+ * environment no longer overrides anything, and a person can choose a built-in default value on purpose. API keys
+ * are not part of this: they follow "saved wins, the environment fills the gap" at use time.
+ * @param {{ settings: { get(): object, exists(): boolean } }} db
+ * @param {Record<string,string|undefined>} env
+ * @returns {object} internal settings (raw API keys inside: never send them out)
+ */
+export function loadEffectiveSettings(db, env) {
+  const stored = db.settings.get();
+  return db.settings.exists() ? stored : applyEnvSeed(stored, env);
+}
+
+/**
  * @param {{ db: object, env?: Record<string,string|undefined>, fetch?: typeof fetch }} deps
  */
 export function createAiService({ db, env = process.env, fetch: fetchImpl }) {
   const providerOpts = () => (fetchImpl ? { fetch: fetchImpl } : {});
 
-  /** Saved settings with the environment's URL/model seeds applied (raw API keys inside: never send them out). */
+  /** The settings in force, see loadEffectiveSettings() (raw API keys inside: never send them out). */
   function loadSettings() {
-    return applyEnvSeed(db.settings.get(), env);
+    return loadEffectiveSettings(db, env);
   }
 
   return {

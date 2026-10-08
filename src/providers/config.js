@@ -2,7 +2,12 @@
 // Takes the INTERNAL settings shape of docs/ARCHITECTURE.md §5 (never the masked public one).
 
 import { effectiveApiKey } from '../env-keys.js';
+import { DEFAULT_TIMEOUT_SEC } from '../settings.js';
 import { ProviderError } from './errors.js';
+
+// One number for every provider (settings `ai.timeoutSec`); the per-provider copies below only matter to callers that
+// hand over settings without it. A local model's first request loads the model from disk, which is the slowest case.
+const DEFAULT_TIMEOUT_MS = DEFAULT_TIMEOUT_SEC * 1000;
 
 export const PROVIDER_IDS = Object.freeze(['gemini', 'openai', 'local']);
 
@@ -12,18 +17,17 @@ export const PROVIDER_DEFAULTS = Object.freeze({
     // Flash-Lite: ~1 s to the first byte and the best free quota (gemini-flash-latest was 16-23 s and often "busy").
     model: 'gemini-flash-lite-latest',
     thinking: 'auto',
-    timeoutMs: 120_000,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
   }),
   openai: Object.freeze({
     baseUrl: 'https://api.openai.com/v1',
     model: 'gpt-4o-mini',
-    timeoutMs: 120_000,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
   }),
   local: Object.freeze({
     baseUrl: 'http://localhost:11434/v1',
     model: 'llama3.2:3b',
-    // A first request loads the model from disk; on a small machine that is slow.
-    timeoutMs: 180_000,
+    timeoutMs: DEFAULT_TIMEOUT_MS,
   }),
 });
 

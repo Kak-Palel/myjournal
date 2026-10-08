@@ -1,12 +1,12 @@
 // MyJournal entry point:  npm start
-// Loads .env, reads the configuration, opens the database, starts the HTTP server and shuts down cleanly.
+// Checks the Node.js version, loads .env, reads the configuration, opens the database, starts the HTTP server and
+// shuts down cleanly.
+//
+// Only the dependency-free version check is imported statically. Everything else (which reaches node:sqlite)
+// is loaded with import() once the check has passed: on a Node.js that is too old, a static import would fail
+// with a raw "No such built-in module: node:sqlite" stack trace before any friendly message could be printed.
 
-import { openDb, DbError } from './src/db/index.js';
-import { ConfigError, assertSafeToStart, loadConfig, loadDotEnv } from './src/config.js';
-import { createApp, ListenError } from './src/server/app.js';
-import { formatBanner } from './src/server/banner.js';
-import { ignoreStdioErrors } from './src/server/logger.js';
-import { applyEnvSeed } from './src/settings.js';
+import { nodeVersionProblem } from './src/server/node-version.js';
 
 function fail(message, hint) {
   process.stderr.write(`\nMyJournal could not start.\n  ${message}\n${hint ? `  ${hint}\n` : ''}\n`);
@@ -14,6 +14,20 @@ function fail(message, hint) {
 }
 
 async function main() {
+  const tooOld = nodeVersionProblem();
+  if (tooOld) {
+    process.stderr.write(`\n${tooOld}\n\n`);
+    process.exit(1);
+  }
+  const [{ openDb, DbError }, { ConfigError, assertSafeToStart, loadConfig, loadDotEnv }, { createApp, ListenError }, { formatBanner }, { ignoreStdioErrors }, { loadEffectiveSettings }] = await Promise.all([
+    import('./src/db/index.js'),
+    import('./src/config.js'),
+    import('./src/server/app.js'),
+    import('./src/server/banner.js'),
+    import('./src/server/logger.js'),
+    import('./src/server/ai-service.js'),
+  ]);
+
   ignoreStdioErrors(); // `npm start | head` must not take the server down with an EPIPE
   const dotenv = loadDotEnv();
   if (dotenv.error) process.stderr.write(`warning: could not read ${dotenv.path}: ${dotenv.error}\n`);
@@ -65,7 +79,7 @@ async function main() {
     if (err instanceof ListenError) fail(err.message, err.hint);
     throw err;
   }
-  process.stdout.write(formatBanner({ config, url: address.url, settings: applyEnvSeed(db.settings.get(), config.env) }));
+  process.stdout.write(formatBanner({ config, url: address.url, settings: loadEffectiveSettings(db, config.env) }));
 }
 
 // A bug in one request must not take the journal down; the details go to the terminal.

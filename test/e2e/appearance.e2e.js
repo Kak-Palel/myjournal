@@ -13,8 +13,8 @@ const seed = (db) => {
   });
 };
 
-// Two confirmed contrast problems are pinned down in their own (skipped) tests below; the general checks leave them out so
-// that everything ELSE stays protected.
+// Two contrast problems found by the first audit (the active navigation item and the AI pill in light mode, danger buttons in
+// dark mode) are fixed; they keep a test of their own next to the general checks that now cover everything.
 const ACTIVE_NAV_AND_PILL = ['[aria-current="page"]', 'a[href="#/settings"][title]'];
 const DANGER_BUTTON_IN_DIALOG = ['dialog button[class*="danger"]'];
 
@@ -66,24 +66,24 @@ describe('dark mode', () => {
     await page.getByRole('menuitem', { name: /Delete entry/ }).click();
     await page.getByRole('dialog').waitFor();
     assert.deepEqual(await auditLightSurfaces(page), [], 'the open dialog is dark');
-    assert.deepEqual(await auditContrast(page, { ignore: DANGER_BUTTON_IN_DIALOG }), [], 'the dialog text is readable');
+    assert.deepEqual(await auditContrast(page), [], 'the dialog text is readable');
     await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
 
     await j.goto('/memory');
     await page.getByRole('button', { name: 'Pin this memory' }).first().click();
     await page.getByRole('status').filter({ hasText: /Pinned to the top|Unpinned/ }).waitFor();
     // (toasts are deliberately inverted - a light card on the dark page - so only their readability is checked)
-    assert.deepEqual(await auditContrast(page, { ignore: ACTIVE_NAV_AND_PILL }), [], 'a toast is readable');
+    assert.deepEqual(await auditContrast(page), [], 'a toast is readable');
     await page.getByRole('status').filter({ hasText: /Pinned to the top|Unpinned/ }).waitFor({ state: 'detached', timeout: 6000 });
 
     await j.goto('/settings?tab=local');
     await ui.button(page, 'Test connection').click();
     await page.getByText('Connected', { exact: true }).waitFor();
-    assert.deepEqual(await auditContrast(page, { ignore: ACTIVE_NAV_AND_PILL }), [], 'a success notice is readable');
+    assert.deepEqual(await auditContrast(page), [], 'a success notice is readable');
     await page.getByLabel('Base URL', { exact: true }).fill('http://127.0.0.1:9/v1');
     await ui.button(page, 'Test connection').click();
     await page.getByRole('alert').filter({ hasText: 'Things to try' }).waitFor();
-    assert.deepEqual(await auditContrast(page, { ignore: ACTIVE_NAV_AND_PILL }), [], 'an error notice is readable');
+    assert.deepEqual(await auditContrast(page), [], 'an error notice is readable');
     assert.deepEqual(await auditLightSurfaces(page), []);
   }));
 });
@@ -96,7 +96,7 @@ describe('contrast (WCAG AA)', () => {
       const { page } = j;
       for (const path of await routes(j)) {
         await visit(j, path);
-        const bad = await auditContrast(page, { ignore: ACTIVE_NAV_AND_PILL });
+        const bad = await auditContrast(page);
         assert.deepEqual(bad, [], `${path} (${scheme}): text below 4.5:1 (3:1 for large text)`);
       }
     }));
@@ -113,10 +113,9 @@ describe('contrast (WCAG AA)', () => {
     assert.deepEqual(await auditContrast(page, { only: ['dialog'] }), []);
   }));
 
-  // Confirmed with the audit above (repeatable): --primary (#4f7a5f) text on --primary-soft (#e3eee6) is 4.12:1, below 4.5:1,
-  // for the active navigation item and the AI pill in the sidebar (light mode). Proposed: a darker text colour such as #476f56
-  // (4.80:1) for text that sits on --primary-soft (.nav-link.is-active, .tab-link.is-active, .ai-pill, .chip-primary).
-  test('the active navigation item and the AI pill meet AA in light mode', { skip: 'BUG: base.css - var(--primary) on var(--primary-soft) is 4.12:1 (needs 4.5) for the active nav item and the sidebar AI pill; use e.g. #476f56 (4.80:1) for text on --primary-soft' }, () => journey({
+  // Regression: --primary (#4f7a5f) on --primary-soft (#e3eee6) was 4.12:1 for the active navigation item and the AI pill in
+  // the sidebar (light mode); the brand tokens were deepened until every pairing reaches 4.5:1.
+  test('the active navigation item and the AI pill meet AA in light mode', () => journey({
     name: 'appearance-contrast-nav-light', colorScheme: 'light', seed,
   }, async (j) => {
     const { page } = j;
@@ -124,10 +123,9 @@ describe('contrast (WCAG AA)', () => {
     assert.deepEqual(await auditContrast(page, { only: ACTIVE_NAV_AND_PILL }), []);
   }));
 
-  // Confirmed (repeatable): white text on the dark-theme danger colour #ee8c7b is 2.42:1 (needs 4.5:1) - "Delete entry",
-  // "Forget", "Delete everything" and every other danger button in dark mode. Proposed: dark ink (#1f0b07 gives 7.8:1) for
-  // .btn-danger under the dark theme, as the dark toasts already do.
-  test('danger buttons in dialogs are readable in dark mode', { skip: 'BUG: base.css - .btn-danger is #fff on #ee8c7b (2.42:1) in dark mode; use dark text such as #1f0b07 (7.8:1) under the dark theme' }, () => journey({
+  // Regression: white text on the dark-theme danger colour #ee8c7b was 2.42:1 - "Delete entry", "Forget", "Delete everything"
+  // and every other danger button in dark mode now use dark ink (--danger-contrast).
+  test('danger buttons in dialogs are readable in dark mode', () => journey({
     name: 'appearance-contrast-danger-dark', colorScheme: 'dark', seed,
   }, async (j) => {
     const { page, db } = j;

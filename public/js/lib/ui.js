@@ -197,11 +197,15 @@ export function openModal(content, { title = '', wide = false, label, onClose } 
 
 /**
  * Promise<boolean> confirmation dialog. `requireText` makes the user type a word (e.g. "DELETE").
+ * Initial focus follows the WAI-ARIA dialog guidance: the least destructive control. A `danger` dialog opens on Cancel, so
+ * a stray Enter or Space cannot delete anything; one with `requireText` opens on the box the person has to type in; any
+ * other dialog opens on its confirm button.
  */
 export function confirmDialog({ title = 'Are you sure?', body = '', confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = false, requireText = '' } = {}) {
   return new Promise((resolve) => {
     let input = null;
     const confirmBtn = h('button', { type: 'button', class: ['btn', danger ? 'btn-danger' : 'btn-primary'], disabled: Boolean(requireText), onClick: () => modal.close(true) }, confirmLabel);
+    const cancelBtn = h('button', { type: 'button', class: 'btn btn-ghost', onClick: () => modal.close(false) }, cancelLabel);
     if (requireText) {
       input = h('input', {
         type: 'text', class: 'input', autocomplete: 'off', 'aria-label': `Type ${requireText} to confirm`, placeholder: requireText,
@@ -212,12 +216,10 @@ export function confirmDialog({ title = 'Are you sure?', body = '', confirmLabel
     const content = h('div', { class: 'stack' },
       typeof body === 'string' ? h('p', null, body) : body,
       requireText ? h('label', { class: 'field' }, h('span', { class: 'field-label' }, `Type ${requireText} to confirm`), input) : null,
-      h('div', { class: 'row row-end' },
-        h('button', { type: 'button', class: 'btn btn-ghost', onClick: () => modal.close(false) }, cancelLabel),
-        confirmBtn),
+      h('div', { class: 'row row-end' }, cancelBtn, confirmBtn),
     );
     const modal = openModal(content, { title, label: title, onClose: (r) => resolve(r === true) });
-    if (input) input.focus(); else confirmBtn.focus();
+    if (input) input.focus(); else if (danger) cancelBtn.focus(); else confirmBtn.focus();
   });
 }
 

@@ -4,6 +4,7 @@ import { api } from '../lib/api.js';
 import { icon, toast, confirmDialog, skeleton } from '../lib/ui.js';
 import { MAX_IMPORT_BYTES, summarizeImport, describeImportResult, formatFileSize, pluralize } from './settings-logic.js';
 import { notice, errorNotice, section, withBusy, uid } from './settings-ui.js';
+import { DATA_SENT_WITH_A_REPLY } from './privacy-copy.js';
 
 const isAbort = (err) => Boolean(err) && err.name === 'AbortError';
 const fmt = (n) => (Number.isFinite(Number(n)) ? Number(n).toLocaleString() : '0');
@@ -206,7 +207,7 @@ export function createDataPanel({ app, signal }) {
       title: 'Where your data lives',
       children: [h('div', { class: 'stack-sm settings-prose' },
         h('p', null, 'Your journal is one SQLite file in the data folder of the computer running MyJournal (', h('code', { class: 'code' }, './data'), ' by default; set ', h('code', { class: 'code' }, 'JOURNAL_DATA_DIR'), ' to move it). Back it up by copying that folder while MyJournal is stopped, or use Export.'),
-        h('p', null, 'Nothing leaves your computer unless the AI companion is on. Then each reply sends the current conversation, your "About you" text and your memories to the provider you chose, and nothing else.'),
+        h('p', null, DATA_SENT_WITH_A_REPLY),
         h('p', null, h('strong', null, 'API keys: '), 'a key you paste in Settings is saved in that same file, unencrypted. If that matters to you, leave the key fields empty and start MyJournal with ', h('code', { class: 'code' }, 'GEMINI_API_KEY'), ', ', h('code', { class: 'code' }, 'OPENAI_API_KEY'), ' or ', h('code', { class: 'code' }, 'LOCAL_LLM_API_KEY'), ' set instead.'))],
     }),
     accessSlot,

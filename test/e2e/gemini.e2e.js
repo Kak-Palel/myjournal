@@ -131,10 +131,10 @@ describe('Gemini failure modes the live service really has', () => {
     assert.ok(mocks.gemini.generateRequests().length >= 1);
     assert.equal(db.messages.list(made.entry.id).length, 1, 'the person\'s message is safe');
 
-    // (the banner has no "Open settings" link for a busy model although its hint says to switch in Settings - noted in the
-    // report as a small UX gap - so go through the sidebar's AI pill, which always leads to the active provider's tab)
-    await page.getByRole('link', { name: /^Gemini · gemini-flash-latest$/ }).click();
-    await page.waitForURL(/#\/settings/);
+    // the hint says to switch model in Settings, so the banner offers the way there next to Try again
+    await problem.getByRole('button', { name: 'Try again' }).waitFor();
+    await problem.getByRole('link', { name: 'Open settings' }).click();
+    await page.waitForURL(/#\/settings\?tab=gemini/);
     await page.getByRole('button', { name: /^gemini-flash-lite-latest/ }).click();
     await ui.button(page, 'Save').click();
     await eventually(() => assert.equal(db.settings.get().ai.providers.gemini.model, 'gemini-flash-lite-latest'));

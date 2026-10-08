@@ -105,6 +105,36 @@ describe('auth units', () => {
     assert.equal(limiter.retryAfterSeconds('a'), 0);
   });
 
+  it('stays bounded under a flood of distinct addresses, and keeps the recent offenders', () => {
+    let now = 0;
+    const limiter = createLoginLimiter({ max: 5, windowMs: 60_000, now: () => now });
+    for (let i = 0; i < 30_000; i += 1) {
+      limiter.fail(`10.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`);
+      if (i % 1000 === 0) now += 1; // time passes, nothing expires yet
+      assert.ok(limiter.size <= 10_000, `table grew to ${limiter.size} at ${i}`);
+    }
+    assert.ok(limiter.size >= 5_000, 'it keeps a useful number of recent addresses');
+    // the newest offender is still being counted
+    const last = `10.0.${(29_999 >> 8) & 255}.${29_999 & 255}`;
+    for (let i = 0; i < 4; i += 1) limiter.fail(last);
+    assert.ok(limiter.retryAfterSeconds(last) > 0, 'five failures from a recent address are still limited');
+    // and old entries disappear on their own once the window has passed and the address is seen again
+    now += 120_000;
+    assert.equal(limiter.retryAfterSeconds(last), 0);
+  });
+
+  it('keeps one table per limiter and never tracks a success', () => {
+    const limiter = createLoginLimiter({ max: 5, windowMs: 60_000 });
+    assert.equal(limiter.size, 0);
+    limiter.retryAfterSeconds('a');
+    limiter.reset('a');
+    assert.equal(limiter.size, 0, 'looking at an address or resetting it adds nothing');
+    limiter.fail('a');
+    assert.equal(limiter.size, 1);
+    limiter.reset('a');
+    assert.equal(limiter.size, 0);
+  });
+
   it('treats IPv4-mapped IPv6 addresses as the same client', () => {
     assert.equal(normalizeIp('::ffff:10.0.0.1'), '10.0.0.1');
     assert.equal(normalizeIp('10.0.0.1'), '10.0.0.1');

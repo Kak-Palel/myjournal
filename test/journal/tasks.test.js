@@ -395,9 +395,9 @@ test('parseMemoryLines: rambling without bullets yields nothing', () => {
 
 test('parseMemoryLines: grounding in the entry text', () => {
   const entry = 'My sister Maya called. I told her about the night shifts at the hospital.';
-  assert.deepEqual(parseMemoryLines('- Has a younger sister called Maya\n- Works night shifts\n- Is training for a half marathon', { userText: entry }),
-    ['Has a younger sister called Maya', 'Works night shifts'], 'the marathon fact is not in the entry');
-  assert.deepEqual(parseMemoryLines('- Has a younger sister called Maya', { userText: 'I had a quiet day.' }), []);
+  assert.deepEqual(parseMemoryLines('- Has a sister called Maya\n- Works night shifts\n- Is training for a half marathon', { userText: entry }),
+    ['Has a sister called Maya', 'Works night shifts'], 'the marathon fact is not in the entry');
+  assert.deepEqual(parseMemoryLines('- Has a sister called Maya', { userText: 'I had a quiet day.' }), []);
   assert.deepEqual(parseMemoryLines('- Has a younger sister called Maya', { userText: '' }), ['Has a younger sister called Maya'], 'no text, no check');
   assert.deepEqual(parseMemoryLines('- Works as a nurse', { userText: "I'm a nurse on the ward" }), ['Works as a nurse']);
   assert.deepEqual(parseMemoryLines('- Is a night-shift worker', { userText: 'I work nights' }), ['Is a night-shift worker']);
@@ -559,8 +559,12 @@ test('parseMemoryLines: facts copied from the prompt examples are dropped unless
   const copied = '- Has a younger sister called Maya\n- Works as a nurse\n- Is training for a half marathon';
   assert.deepEqual(parseMemoryLines(copied, { userText: 'My sister called me today. I trained my dog at the park.' }), []);
   assert.deepEqual(parseMemoryLines(copied, { userText: 'The nurse at the clinic called my sister. I walked the dog and trained for work.' }), ['Works as a nurse'], 'the entry mentions a nurse, but no Maya and no marathon');
-  assert.deepEqual(parseMemoryLines(copied, { userText: 'My sister Maya called me. I am a nurse. I am training for a half marathon in March.' }),
+  assert.deepEqual(parseMemoryLines(copied, { userText: 'My younger sister Maya called me. I am a nurse. I am training for a half marathon in March.' }),
     ['Has a younger sister called Maya', 'Works as a nurse', 'Is training for a half marathon']);
+  // The entry has the example's name (a real Maya), but not "younger": the model copied the rest of the example fact.
+  assert.deepEqual(parseMemoryLines(copied, { userText: 'My sister Maya called me. I am a nurse. I am training for a half marathon in March.' }),
+    ['Works as a nurse', 'Is training for a half marathon']);
+  assert.deepEqual(parseMemoryLines('- Has a sister called Maya', { userText: 'My sister Maya called me.' }), ['Has a sister called Maya']);
   assert.deepEqual(parseMemoryLines('- Is training for a half marathon', { userText: 'I trained my dog at the park.' }), []);
   assert.deepEqual(parseMemoryLines('- is training for a half-marathon.', { userText: 'I trained my dog at the park.' }), [], 'reworded copy');
 });
@@ -600,9 +604,12 @@ test('parseMemoryLines: first-person words never survive in a fact', () => {
   assert.deepEqual(parseMemoryLines('- I have a brother, Tom, and I talk to him weekly'), [], 'two clauses about the writer and someone else');
   assert.deepEqual(parseMemoryLines('- Teaches myself guitar'), []);
   assert.deepEqual(parseMemoryLines("- Is someone I'd trust"), []);
-  // other languages are not touched
+  // other languages: a lone possessive becomes the third person, a line in the writer's own voice is dropped
   assert.deepEqual(parseMemoryLines('- Le gusta el senderismo'), ['Le gusta el senderismo']);
-  assert.deepEqual(parseMemoryLines('- Vive con mi pareja Alex'), ['Vive con mi pareja Alex']);
+  assert.deepEqual(parseMemoryLines('- Vive con mi pareja Alex'), ['Vive con su pareja Alex']);
+  assert.deepEqual(parseMemoryLines('- Habite avec mon compagnon Alex'), ['Habite avec son compagnon Alex']);
+  assert.deepEqual(parseMemoryLines('- Tengo una hermana llamada Maya'), []);
+  assert.deepEqual(parseMemoryLines("- J'ai parlé à mon père au téléphone"), []);
 });
 
 test('parseMemoryLines: other people and noun fragments do not pass as facts about the writer', () => {
@@ -621,4 +628,126 @@ test('parseMemoryLines: other people and noun fragments do not pass as facts abo
   assert.deepEqual(parseMemoryLines('- I want to move to Canada', { userText: 'I want to move to Canada one day.' }), ['Wants to move to Canada']);
   assert.deepEqual(parseMemoryLines('- Lives alone', { userText: 'I live alone in a small flat.' }), ['Lives alone']);
   assert.deepEqual(parseMemoryLines('- I do yoga every morning', { userText: 'I do yoga every morning before work.' }), ['Does yoga every morning']);
+});
+
+// ------------------------------------------------------------------------------------------------ prompt tuning (live-measured fixes)
+
+test('parseMeta: the format placeholders of the prompt are never stored, bare or in angle brackets', () => {
+  const echo = 'Title: <2 to 6 words>\nSummary: <one or two short sentences, without "I" or "you">\nEmotions: <1 to 4 feelings, separated by commas>\nTags: <1 to 4 topics, separated by commas>';
+  const parsed = parseMeta(echo, { userText: 'Nothing much happened. Rainy day.', fallbackTitle: 'Rainy day' });
+  assert.equal(parsed.title, 'Rainy day');
+  assert.equal(parsed.summary, 'Nothing much happened. Rainy day.');
+  assert.deepEqual(parsed.tags, []);
+  assert.ok(!parsed.emotions.some((e) => /feeling|comma|\d/.test(e)), JSON.stringify(parsed.emotions));
+  // Markup is the model's text, stored as text and never unwrapped or dropped.
+  assert.equal(parseMeta('Title: <img src=x onerror=1>\nSummary: <script>x()</script> and more', { userText: 'x' }).title, '<img src=x onerror=1>');
+  assert.equal(parseMeta('Title: <img src=x onerror=1>\nSummary: <script>x()</script> and more', { userText: 'x' }).summary, '<script>x()</script> and more');
+  // Real content that a model wrapped in angle brackets is kept.
+  assert.deepEqual(parseMeta('Title: <A quiet rainy day>\nSummary: <Stayed in and made pasta.>\nEmotions: <flat, calm>\nTags: <rest, home>', { userText: 'Rainy day.' }),
+    { title: 'A quiet rainy day', summary: 'Stayed in and made pasta.', emotions: ['flat', 'calm'], tags: ['rest', 'home'] });
+  // Each placeholder on its own, bare.
+  for (const bare of ['2 to 6 words', '1 to 4 feelings, separated by commas', '1 to 4 topics, separated by commas', 'one or two short sentences']) {
+    const r = parseMeta(`Title: ${bare}\nSummary: ${bare}\nEmotions: ${bare}\nTags: ${bare}`, { userText: 'Nothing much happened.', fallbackTitle: 'Fallback' });
+    assert.equal(r.title, 'Fallback', bare);
+    assert.ok(!/\d to \d|short sentences/.test(`${r.summary} ${r.emotions} ${r.tags}`), bare);
+  }
+});
+
+test('parseMeta: a copied old example is still recognised when it comes back from a model', () => {
+  const copy = 'Title: Rainy bike ride home\nSummary: Got soaked cycling home but felt free and cheerful by the end.\nEmotions: cheerful, free\nTags: cycling, weather\n\nFeeling: anxious\nTopic: performance';
+  const r = parseMeta(copy, { userText: 'I presented the numbers and my hands shook.', firstMessage: 'I presented the numbers and my hands shook.' });
+  assert.notEqual(r.title, 'Rainy bike ride home');
+  assert.deepEqual(r.tags, []);
+});
+
+test('parseMeta: fallback titles drop the template label and are not cut mid-phrase', () => {
+  const title = (text) => parseMeta('', { userText: text, firstMessage: text }).title;
+  assert.equal(title('Situation: my friend Priya cancelled our dinner on Friday for the third time this month. Automatic thought: she does not value me.'), 'My friend Priya cancelled our dinner on Friday');
+  assert.equal(title("Rose: my neighbour left a jar of homemade plum jam at my door with a note saying thanks for watering her plants."), 'My neighbour left a jar of homemade plum jam');
+  assert.equal(title('I called my sister Maya in the evening and that helped a lot. We talked for an hour.'), 'I called my sister Maya in the evening');
+  assert.equal(title('Alex and I had another argument tonight about who does the dishes, which is obviously not really about the dishes.'), 'Alex and I had another argument tonight');
+  assert.equal(title('Today was rough, I had to present the quarterly numbers to the whole team and my hands were shaking.'), 'Today was rough');
+  assert.equal(title('Short and sweet.'), 'Short and sweet');
+  assert.equal(title('Note: x'), 'Note: x', 'a label with almost nothing after it is not stripped');
+  assert.equal(title('今日は仕事が忙しくて、昼ごはんを食べる時間もありませんでした。'), '今日は仕事が忙しくて、昼ごはんを食べる時間もありませんでした');
+  // The fallback summary does not start with the template label either.
+  assert.equal(parseMeta('', { userText: 'Situation: my friend cancelled dinner again on Friday. I was hurt.' }).summary, 'My friend cancelled dinner again on Friday. I was hurt.');
+  // A title the person or the model gave is not touched.
+  assert.equal(parseMeta('Title: Situation: dinner', { userText: 'x' }).title, 'Situation: dinner');
+});
+
+test('parseMemoryLines: an echoed example needs every distinctive word of the fact in the entry', () => {
+  const entry = 'My sister Maya called me and I told her about the night shifts.';
+  assert.deepEqual(parseMemoryLines('- Has a younger sister called Maya', { userText: entry }), [], '"younger" is the prompt\'s, not the entry\'s');
+  assert.deepEqual(parseMemoryLines('- Has a sister called Maya', { userText: entry }), ['Has a sister called Maya']);
+  assert.deepEqual(parseMemoryLines('- Has a younger sister called Maya', { userText: `${entry} She is three years younger than me.` }), ['Has a younger sister called Maya']);
+  assert.deepEqual(parseMemoryLines('- Works as a nurse', { userText: 'I am a nurse on the night ward.' }), ['Works as a nurse']);
+  assert.deepEqual(parseMemoryLines('- Works as a pediatric nurse', { userText: 'I am a nurse on the night ward.' }), [], 'an invented specialisation of the example');
+  assert.deepEqual(parseMemoryLines('- Is training for a half marathon', { userText: 'I am training for a half marathon in March.' }), ['Is training for a half marathon']);
+});
+
+test('parseMemoryLines: what the writer is doing right now, scenes and diary events are not lasting facts', () => {
+  const entry = 'Nothing much happened. I stayed in, made pasta and answered a few emails. My friend cancelled our dinner. I am planning to ask for Friday off. I am waiting for someone to arrive. I am cooking a ratatouille with my roommate Chloé tonight. I am training for a 10k run.';
+  for (const line of ['Is planning to ask for Friday off', 'Is waiting for someone to arrive', 'Is cooking a ratatouille with their roommate Chloé', 'Is considering a pottery class', 'Is trying to find a way to cope',
+    'Is starting to suspect that days like this do not exist', 'Is just a backup plan', 'Has never felt this heavy before', 'Does not even know where to start', 'Has been eating a lot of biscuits', 'Has been having trouble sleeping for weeks',
+    'Was in their grandmother\'s kitchen', 'Their friend cancelled their planned dinner', 'Their apple cake', 'Their team shipped a new feature', 'Stayed in', 'Made pasta', 'Answered emails']) {
+    assert.deepEqual(parseMemoryLines(`- ${line}`, { userText: entry }), [], line);
+  }
+  for (const line of ['Is training for a 10k run', 'Has been living in this city for eight months', 'Is studying for a nursing degree', 'Was born in Leeds', 'Was raised by their grandmother', 'Their grandmother passed away a year ago']) {
+    assert.deepEqual(parseMemoryLines(`- ${line}`), [line], line);
+  }
+});
+
+test('parseMemoryLines: a short entry without common English words is still judged as English', () => {
+  // "Stayed in" used to pass because nothing marked this tiny entry as English.
+  const entry = 'Nothing much happened. Rainy, stayed in, answered a few emails, made pasta. A bit flat but not bad.';
+  assert.deepEqual(parseMemoryLines('- Stayed in\n- Made pasta\n- Answered emails', { userText: entry }), []);
+});
+
+test('parseMemoryLines: format placeholders and copied sentences are not facts, hostile text stays text', () => {
+  assert.deepEqual(parseMemoryLines('- <short fact>\n- Likes <short fact>'), []);
+  assert.deepEqual(parseMemoryLines('- Likes <script>window.x=1</script>'), ['Likes <script>window.x=1</script>'], 'markup is text, not a reason to drop the line');
+  const entry = 'Mi jefa me pidió terminar el informe antes del viernes y no dormí bien. Por la tarde fui a caminar con mi perro Canela por el parque.';
+  assert.deepEqual(parseMemoryLines('- Mi jefa me pidió terminar el informe antes del viernes\n- Tiene un perro llamado Canela', { userText: entry }), ['Tiene un perro llamado Canela']);
+  assert.deepEqual(parseMemoryLines('- Por la tarde fui a caminar con mi perro Canela por el parque', { userText: entry }), [], 'a verbatim sentence');
+  // A short sentence that is itself the fact is fine.
+  assert.deepEqual(parseMemoryLines('- Has a sister called Maya', { userText: 'I have a sister called Maya.' }), ['Has a sister called Maya']);
+  // The same in English: an entry sentence copied word for word.
+  assert.deepEqual(parseMemoryLines('- Presented the quarterly numbers to the whole team in the morning meeting', { userText: 'I presented the quarterly numbers to the whole team in the morning meeting today.' }), []);
+});
+
+test('parseMemoryLines: other languages are judged by voice and tense, not only by grounding', () => {
+  const es = 'Hoy fue un día largo. Mi jefa me pidió terminar el informe. Camino cada tarde con mi perro Canela. Mi hermana Lucía vive en Sevilla y trabaja como enfermera.';
+  for (const line of ['Había terminado el informe', 'Dormía bien', 'Lucía se siente muy contenta', 'Su hermana Lucía vino de visita desde Sevilla', 'Tengo una hermana llamada Lucía', 'Él habló con su hermana']) {
+    assert.deepEqual(parseMemoryLines(`- ${line}`, { userText: es }), [], line);
+  }
+  for (const line of ['Tiene un perro llamado Canela', 'Su hermana Lucía vive en Sevilla', 'Trabaja como enfermera', 'Vive con mi pareja Alex']) {
+    const got = parseMemoryLines(`- ${line}`, { userText: `${es} Alex es mi pareja.` });
+    assert.equal(got.length, 1, line);
+    assert.ok(!/\b(?:mi|mis)\b/i.test(got[0]), got[0]);
+  }
+  const fr = "Aujourd'hui j'ai parlé à mon père au téléphone. Il a ri en parlant de mon enfance à Lyon. Je vais cuisiner avec ma colocataire Chloé.";
+  for (const line of ["J'ai parlé à mon père au téléphone", "Il a ri en parlant de son enfance à Lyon", 'Elle a dit que']) {
+    assert.deepEqual(parseMemoryLines(`- ${line}`, { userText: fr }), [], line);
+  }
+  assert.deepEqual(parseMemoryLines('- A une colocataire, Chloé', { userText: fr }), ['A une colocataire, Chloé']);
+  // Japanese: plans and past polite forms are events.
+  const ja = '今日は忙しかったです。帰り道に妹のあやと電話しました。週末は二人で京都に行く予定です。';
+  assert.deepEqual(parseMemoryLines('- 京都に行く予定です。\n- 妹のあやと電話しました。\n- 仕事の忙しさにより、昼ごはんを食べる時間もありません。\n- 始めての京都旅に楽しみだが、ちょっと疲れています。', { userText: ja }), []);
+  assert.deepEqual(parseMemoryLines('- 妹のあやがいる', { userText: ja }), ['妹のあやがいる']);
+});
+
+test('parseMemoryLines: a chat reply given instead of a fact list is not stored, in any language', () => {
+  const ja = '今日は仕事が忙しくて、昼ごはんを食べる時間もありませんでした。帰り道に妹のあやと電話して、少し元気が出ました。';
+  const jaReply = 'お昼も食べられないほど忙しい一日だったんだね、本当にお疲れ様。妹のあやさんと話して少し元気が出たのはよかったね。';
+  assert.deepEqual(parseMemoryLines(jaReply, { userText: ja }), []);
+  assert.deepEqual(parseMemoryLines('妹のあやさんと話して、あなたは元気になりました', { userText: ja }), []);
+  const es = 'Hoy fue un día largo y fui a caminar con mi perro Canela por el parque.';
+  assert.deepEqual(parseMemoryLines('Hoy compartiste el peso de un día cansado, aunque trajiste a este espacio el alivio de caminar con Canela por el parque', { userText: es }), []);
+  assert.deepEqual(parseMemoryLines('Tu perro Canela es muy cariñoso', { userText: es }), [], 'second person (possessive)');
+  assert.deepEqual(parseMemoryLines('Tiene un perro llamado Canela', { userText: es }), ['Tiene un perro llamado Canela']);
+  assert.deepEqual(parseMemoryLines("Aujourd'hui, tu as traversé un mélange de soulagement. Passe une douce soirée.", { userText: "J'ai parlé à mon père. Il a ri en parlant de mon enfance à Lyon." }), []);
+  // Two sentences are a paragraph, not a fact.
+  assert.deepEqual(parseMemoryLines('Works as a nurse. Loves hiking in the mountains.'), []);
+  assert.deepEqual(parseMemoryLines('- Works as a nurse\n- Loves hiking in the mountains'), ['Works as a nurse', 'Loves hiking in the mountains']);
 });

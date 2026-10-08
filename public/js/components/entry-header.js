@@ -6,6 +6,7 @@ import { icon, moodPicker } from '../lib/ui.js';
 import { LABEL_LIMITS, addLabel, removeLabel } from './entry-labels.js';
 import { committableDate, DATE_SETTLE_MS } from './entry-date.js';
 import { createMenu } from './entry-menu.js';
+import { PRIVATE_MENU_DESCRIPTION, PRIVATE_FLAG_TITLE } from './privacy-copy.js';
 
 const TITLE_MAX = 120;
 
@@ -151,7 +152,7 @@ export function createHeader({ entry, onPatch, onExport, onDelete, notify }) {
 
   const menuItems = () => [
     {
-      id: 'private', label: 'Private entry', description: 'Keeps it out of memory, recall and weekly reflections.', icon: 'lock',
+      id: 'private', label: 'Private entry', description: PRIVATE_MENU_DESCRIPTION, icon: 'lock',
       checkbox: true, checked: Boolean(current.private), onSelect: () => patch({ private: !current.private }),
     },
     { id: 'pin', label: current.pinned ? 'Unpin entry' : 'Pin entry', icon: 'pin', onSelect: () => patch({ pinned: !current.pinned }) },
@@ -178,7 +179,7 @@ export function createHeader({ entry, onPatch, onExport, onDelete, notify }) {
     else if (document.activeElement !== date && dateTimer === null) date.value = current.date || '';
     mood.set(current.mood ?? null);
     mount(flags,
-      current.private ? h('span', { class: 'entry-flag', title: 'Private: kept out of memory and weekly reflections' }, icon('lock', { size: 14 }), 'Private') : null,
+      current.private ? h('span', { class: 'entry-flag', title: PRIVATE_FLAG_TITLE }, icon('lock', { size: 14 }), 'Private') : null,
       current.pinned ? h('span', { class: 'entry-flag', title: 'Pinned' }, icon('pin', { size: 14 }), 'Pinned') : null);
     emotions.paint();
     tags.paint();

@@ -53,6 +53,10 @@ export default async function settingsView(ctx) {
   const startTab = resolveTab(query.get('tab'), app.settings.ai.provider);
   const panels = new Map();
   let setupSaved = false;
+  /** The provider the first-run banner is about (the tab in the address, else the one that is in use). */
+  const setupProvider = () => (PROVIDER_IDS.includes(query.get('tab')) ? query.get('tab') : app.settings.ai.provider);
+  /** Does the server use a key from its environment for this provider (and none saved in Settings)? */
+  const keyFromEnv = (id) => id !== 'local' && Boolean(app.settings.ai.providers[id]) && app.settings.ai.providers[id].apiKeySource === 'env';
 
   /* ----------------------------------------------------------- the parts */
   const statusEl = h('div', { class: 'settings-status', role: 'status' });
@@ -77,8 +81,14 @@ export default async function settingsView(ctx) {
         info, app, signal,
         onChange: paintMarkers,
         onSaved: () => { setupSaved = true; paintBanner(); },
+        // First run with a key the server found in its environment: nothing needs saving, so a connection test that works
+        // for what is saved is the last step (the same "You are all set" as after Save).
+        onTested: ({ dirty }) => {
+          if (setup && id === setupProvider() && keyFromEnv(id) && !dirty) { setupSaved = true; form.emphasizeTest(false); paintBanner(); }
+        },
       });
       if (id === 'local') attachLocalExtras({ form, info, signal });
+      if (setup && id === setupProvider() && keyFromEnv(id)) form.emphasizeTest(true);
       return form;
     }
     if (id === 'general') return createGeneralPanel({ app, signal, onChange: paintMarkers });
@@ -223,7 +233,7 @@ export default async function settingsView(ctx) {
 
   function paintBanner() {
     if (!setup) return;
-    const provider = PROVIDER_IDS.includes(query.get('tab')) ? query.get('tab') : app.settings.ai.provider;
+    const provider = setupProvider();
     const ready = setupSaved && app.aiReady() && app.settings.ai.enabled;
     if (ready) {
       mount(bannerEl, notice({
@@ -236,12 +246,13 @@ export default async function settingsView(ctx) {
       }));
       return;
     }
-    const steps = setupSteps(provider);
+    const fromEnv = keyFromEnv(provider);
+    const steps = setupSteps(provider, { keyFromEnv: fromEnv });
     mount(bannerEl, notice({
       tone: 'info',
       children: [
-        h('strong', null, 'Almost there - two quick steps'),
-        h('ol', { class: 'settings-steps settings-banner-steps' }, steps.map((t) => h('li', null, t))),
+        h('strong', null, fromEnv ? 'Almost there - one quick step' : 'Almost there - two quick steps'),
+        steps.length === 1 ? h('p', { class: 'settings-banner-step' }, steps[0]) : h('ol', { class: 'settings-steps settings-banner-steps' }, steps.map((t) => h('li', null, t))),
         h('p', { class: 'muted small' }, 'You can also skip this and journal without AI.'),
       ],
     }));

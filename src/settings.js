@@ -10,11 +10,19 @@ export const PROVIDER_IDS = Object.freeze(['gemini', 'openai', 'local']);
 /** Persona ids accepted in `persona.id`. */
 export const PERSONA_IDS = Object.freeze(['companion', 'coach', 'cbt', 'stoic', 'friend', 'custom']);
 /**
- * Gemini thinking modes accepted in `ai.providers.gemini.thinking` (ARCHITECTURE live-verified
- * corrections): 'auto' sends no thinkingConfig, 'low' asks for thinkingLevel low. A stored legacy
+ * Gemini thinking modes accepted in `ai.providers.gemini.thinking` (docs/ARCHITECTURE.md section 9, Gemini
+ * adapter: thinking): 'auto' sends no thinkingConfig, 'low' asks for thinkingLevel low. A stored legacy
  * value ('fast' / 'default') is not in this list and therefore normalises to 'auto'.
  */
 export const THINKING_MODES = Object.freeze(['auto', 'low']);
+
+/**
+ * How long a request may wait for the first word of the reply, in seconds: the one default for every provider.
+ * It is sized for the slowest case, a local model that has to be loaded from disk by the first request (verified
+ * live: Ollama gives up loading the moment the client does, and a 3850-token prompt took 22 s before the first
+ * byte on a small CPU). Node's own fetch stops waiting for response headers after 300 s whatever this says.
+ */
+export const DEFAULT_TIMEOUT_SEC = 180;
 
 /** Hard limits, exported so the UI and the docs can quote the same numbers. */
 export const SETTINGS_LIMITS = Object.freeze({
@@ -50,7 +58,7 @@ export const DEFAULT_SETTINGS = deepFreeze({
     temperature: 0.7,
     maxTokens: 700,
     contextBudgetTokens: 3000,
-    timeoutSec: 120,
+    timeoutSec: DEFAULT_TIMEOUT_SEC,
     providers: {
       gemini: {
         baseUrl: 'https://generativelanguage.googleapis.com',
@@ -345,10 +353,14 @@ const ENV_SEEDS = [
 ];
 
 /**
- * Let OPENAI_BASE_URL, LOCAL_LLM_BASE_URL and LOCAL_LLM_MODEL provide the starting values of a
- * fresh install. A value the user has changed (anything but the built-in default) is never touched,
- * and an invalid environment value is ignored. Idempotent. API keys are not handled here: they are
- * resolved at use time by effectiveApiKey().
+ * Let OPENAI_BASE_URL, LOCAL_LLM_BASE_URL and LOCAL_LLM_MODEL provide the starting values of a FRESH install
+ * (docker-compose points the app at its Ollama service this way). An empty or invalid environment value is
+ * ignored. API keys are not handled here: they are resolved at use time by effectiveApiKey().
+ *
+ * This function seeds unconditionally; WHEN to seed is the caller's decision (see loadEffectiveSettings() in
+ * src/server/ai-service.js): only while no settings document has been saved. Once the first Save has written the
+ * document, with the seeds in it, the environment never overrides a stored field again, so a person can also
+ * pick a built-in default value on purpose.
  * @param {unknown} settings internal settings
  * @param {Record<string,string|undefined>} [env]
  * @returns {typeof DEFAULT_SETTINGS} a new object
@@ -359,7 +371,6 @@ export function applyEnvSeed(settings, env = process.env) {
     const raw = env[seed.env];
     if (typeof raw !== 'string' || raw.trim() === '') continue;
     const defaultValue = DEFAULT_SETTINGS.ai.providers[seed.provider][seed.field];
-    if (out.ai.providers[seed.provider][seed.field] !== defaultValue) continue;
     const parser = seed.field === 'baseUrl' ? parseBaseUrl : modelField();
     const parsed = parser(raw, { lenient: false, defaultValue });
     if (!('error' in parsed)) out.ai.providers[seed.provider][seed.field] = parsed.value;

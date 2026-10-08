@@ -208,9 +208,9 @@ describe('data: wipe', () => {
     await ui.companion(page).first().waitFor();
   }));
 
-  // Confirmed in the browser: Enter in the DELETE box closes the dialog (focus goes back to the "Delete my journal data..."
-  // button during keydown) and the same key press then activates that button, so a fresh, empty dialog opens right after the wipe.
-  test('confirming the wipe with Enter does not open the dialog again', { skip: 'BUG: confirmDialog (public/js/lib/ui.js) - Enter in the "type DELETE" box confirms, then the key press hits the restored-focus trigger button and re-opens the dialog; fix: e.preventDefault() in that keydown handler' }, () => journey({ name: 'data-wipe-enter', seed: 'demo' }, async (j) => {
+  // Regression: Enter in the DELETE box closed the dialog (focus went back to the "Delete my journal data..." button during
+  // keydown) and the same key press then activated that button, so a fresh, empty dialog opened right after the wipe.
+  test('confirming the wipe with Enter does not open the dialog again', () => journey({ name: 'data-wipe-enter', seed: 'demo' }, async (j) => {
     const { page, db } = j;
     await openData(j);
     await ui.button(page, 'Delete my journal data...').click();

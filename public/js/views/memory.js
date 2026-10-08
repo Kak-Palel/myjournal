@@ -6,6 +6,7 @@ import { icon, skeleton, showError, toast, confirmDialog } from '../lib/ui.js';
 import { createMemoryList } from '../components/memory-list.js';
 import { MAX_MEMORY_CHARS, countLabel, validateMemoryText, switchState } from '../components/memory-logic.js';
 import { fieldRow, switchControl, textareaWithCounter, notice, withBusy } from '../components/settings-ui.js';
+import { PRIVATE_MEMORY_TITLE, PRIVATE_MEMORY_TEXT } from '../components/privacy-copy.js';
 
 const isAbort = (err) => Boolean(err) && err.name === 'AbortError';
 
@@ -160,7 +161,7 @@ export default async function memoryView(ctx) {
       h('ul', { class: 'memory-points' },
         point('bookmark', 'A few words each', 'Things like "Has a younger sister called Maya" or "Works night shifts". Never whole entries.'),
         point('sparkles', 'Used when your companion replies', 'The relevant ones are added to the message sent to your AI model, so it can be personal. Nothing else is stored anywhere but this computer.'),
-        point('lock', 'Private entries are never used', 'If you mark an entry private, it is left out of memory, recall and weekly reflections.'),
+        point('lock', PRIVATE_MEMORY_TITLE, PRIVATE_MEMORY_TEXT),
         point('shield', 'You are in charge', 'Edit, pin, or delete any memory at any time. Pinned ones are always at the top.'))),
     h('section', { class: 'card memory-switches', 'aria-labelledby': 'memory-switches-title' },
       h('h2', { class: 'memory-card-title', id: 'memory-switches-title' }, 'Settings'),

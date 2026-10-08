@@ -168,7 +168,11 @@ describe('POST /api/entries/:id/reply', () => {
 
     it('picks up the key from the environment', async () => {
       const port = await freePort();
-      await withApp({ ai: false, env: { OPENAI_API_KEY: 'sk-from-env-0000', OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1` }, settings: { ai: { provider: 'openai' } } }, async (h) => {
+      // A fresh install: OPENAI_BASE_URL seeds the address. Choosing the provider through the API is the first save (a
+      // settings document written behind the app's back would end the "fresh install", and the address would be the
+      // built-in api.openai.com one: this test must never reach the real service).
+      await withApp({ ai: false, env: { OPENAI_API_KEY: 'sk-from-env-0000', OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1` } }, async (h) => {
+        assert.equal((await h.put('/api/settings', { ai: { provider: 'openai' } })).json.ai.providers.openai.baseUrl, `http://127.0.0.1:${port}/v1`);
         const { entry } = await h.entry({ content: 'hello' });
         const stream = await reply(h, entry.id);
         assert.equal(stream.status, 200, 'configured through the environment, so the stream opens');

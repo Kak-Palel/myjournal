@@ -1,9 +1,35 @@
 // Welcome screen (bare layout). Pick how the companion thinks - or skip AI entirely. Choosing saves
 // `onboarded: true` plus the provider via app.saveSettings, then opens Settings on that provider's tab
-// (with setup=1 so it shows the two next steps), or Today for "no AI".
+// (with setup=1 so it shows the two next steps, or the one that is left when the server already has a key in its
+// environment), or Today for "no AI".
 import { h, mount } from '../lib/dom.js';
+import { api } from '../lib/api.js';
 import { icon } from '../lib/ui.js';
 import { notice } from '../components/settings-ui.js';
+import { envKeysFound, envKeyBadgeText } from '../components/settings-logic.js';
+
+/** How long the welcome screen waits for the provider list before it shows up without the "key found" badges. */
+const ENV_LOOKUP_MS = 700;
+
+/**
+ * Which providers already have a key in the server's environment (GET /api/providers, `keySource: 'env'`). Best effort: any
+ * failure or delay just means no badges. Only the variable's name is ever shown, never the key.
+ * @returns {Promise<Record<string, string>>}
+ */
+async function lookUpEnvKeys(signal) {
+  let timer = null;
+  try {
+    const answer = await Promise.race([
+      api.get('/providers', { signal }),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), ENV_LOOKUP_MS); }),
+    ]);
+    return envKeysFound(answer && answer.providers);
+  } catch {
+    return {};
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const CHOICES = [
   {
@@ -40,6 +66,8 @@ const CHOICES = [
 
 export default async function onboardingView(ctx) {
   const { root, app, signal } = ctx;
+  const envKeys = await lookUpEnvKeys(signal);
+  if (signal.aborted) return undefined;
   let busy = false;
   const buttons = [];
   const errorSlot = h('div', { 'aria-live': 'polite' });
@@ -75,7 +103,11 @@ export default async function onboardingView(ctx) {
   }
 
   function card(c) {
-    const btn = h('button', { type: 'button', class: 'btn onboarding-choose', onClick: () => choose(c.id, btn) }, c.cta, icon('chevron-right', { size: 18 }));
+    // A key the server already has (GEMINI_API_KEY, OPENAI_API_KEY): say so, and the choice then leads to a one-step setup.
+    const found = envKeys[c.id] ? h('p', { class: 'onboarding-env', id: `onboarding-env-${c.id}` }, icon('key', { size: 16 }), h('span', null, envKeyBadgeText(c.id))) : null;
+    const btn = h('button', {
+      type: 'button', class: 'btn onboarding-choose', 'aria-describedby': found ? found.id : null, onClick: () => choose(c.id, btn),
+    }, c.cta, icon('chevron-right', { size: 18 }));
     buttons.push(btn);
     return h('li', { class: ['onboarding-card', c.id === 'gemini' ? 'is-featured' : ''] },
       h('div', { class: 'onboarding-card-head' },
@@ -83,6 +115,7 @@ export default async function onboardingView(ctx) {
         c.tag ? h('span', { class: ['chip', c.id === 'gemini' ? 'chip-primary' : ''] }, c.tag) : null),
       h('h3', { class: 'onboarding-card-title' }, c.title),
       h('p', { class: 'onboarding-card-tagline' }, c.tagline),
+      found,
       h('ul', { class: 'onboarding-points' }, c.points.map((p) => h('li', null, icon('check', { size: 16 }), h('span', null, p)))),
       btn);
   }

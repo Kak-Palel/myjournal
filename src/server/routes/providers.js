@@ -10,8 +10,17 @@ import { HttpError, badRequest, conflict, openSse } from '../http.js';
 import { bodyObject, charCount, isPlainObject } from '../validate.js';
 
 const TEST_TIMEOUT_CAP_MS = 90_000;
+// The first request to a local model server loads the model from disk, and giving up cancels that load (verified
+// live on Ollama), so "Test connection" for a local model may wait as long as a real reply would: the configured
+// timeout (180 s by default; Node itself stops waiting for response headers after 300 s).
+const LOCAL_TEST_TIMEOUT_CAP_MS = 300_000;
 const MODELS_TIMEOUT_CAP_MS = 20_000;
 const MAX_MODELS = 2000;
+
+/** The longest a "Test connection" waits for the first word: 90 s, but a local model gets its full configured timeout. */
+export function testTimeoutCapMs(providerId) {
+  return providerId === 'local' ? LOCAL_TEST_TIMEOUT_CAP_MS : TEST_TIMEOUT_CAP_MS;
+}
 // Same rule as the provider layer's Ollama model-name check: no spaces, no "..", no leading slash.
 const MODEL_NAME_RE = /^(?!.*\.\.)(?!\/)[\w.:/@+-]{1,200}$/;
 // eslint-disable-next-line no-control-regex
@@ -66,7 +75,7 @@ export function register(router, { ai, generations, config, log }) {
 
   router.add('POST', '/providers/test', async (ctx) => {
     const { id, overlay } = parseRequest(await ctx.readJson());
-    const { provider, cfg } = ai.buildWithOverlay(id, overlay, { timeoutCapMs: TEST_TIMEOUT_CAP_MS });
+    const { provider, cfg } = ai.buildWithOverlay(id, overlay, { timeoutCapMs: testTimeoutCapMs(id) });
     let body;
     try {
       const result = await provider.test({ signal: ctx.signal });

@@ -42,9 +42,14 @@ describe('something', () => {
   `j.diag.expectStatus(status, pathPattern)`. Zero noise is part of every journey.
 * On failure the error carries the URL, the visible text and a screenshot path.
 * Selectors use roles, labels and visible text only (no CSS classes), so the styling can change freely.
-* `{ skip: 'BUG: ...' }` marks a test that asserts the CORRECT behaviour of a confirmed, still unfixed bug. Remove the skip
-  when the bug is fixed. `E2E_RUN_BUGS=1 npm run test:e2e` runs those tests anyway: each one must FAIL while its bug exists
-  (that is how they were verified) and pass once it is fixed - remove its skip then.
+* `{ skip: 'BUG: ...' }` marks a test that asserts the CORRECT behaviour of a confirmed, still unfixed bug. There are none
+  at the moment: every bug found so far is fixed and its test runs. If you find a new one, write the test for the correct
+  behaviour, mark it this way, and `E2E_RUN_BUGS=1 npm run test:e2e` runs such tests anyway (each one must FAIL while its bug
+  exists and pass once it is fixed - remove its skip then).
+* `E2E_PUBLIC_DIR=/path/to/older/public` serves another copy of `public/` (for example `git archive <commit> public | tar -x -C
+  /somewhere`), which is how a regression test is proven to fail on the old frontend and pass on the new one.
+* `journey({ env: { GEMINI_API_KEY: '...' } })` is the environment of the server (never the developer's own shell), and
+  `keysInEnv: true` hands the mocks' API keys over that way instead of saving them in Settings.
 
 ## Files
 
@@ -59,7 +64,7 @@ describe('something', () => {
 | `settings-providers.e2e.js` | Gemini / OpenAI-compatible / Local tabs, key masking, error states, downloads, unsaved changes |
 | `settings-general.e2e.js` | name, style, limits, AI on/off, theme |
 | `data.e2e.js` | export, import round trip, wipe |
-| `auth.e2e.js` | password login, logout, expiry, rate limit |
+| `auth.e2e.js` | password login, logout, expiry, rate limit, deep links through the password screen (cold start and a session that ends) |
 | `no-ai.e2e.js` | AI not set up, switched off, key missing |
 | `provider-errors.e2e.js` | every way a model call can fail, with Try again |
 | `keyboard.e2e.js` | keyboard-only use, tab order, visible focus |
@@ -71,3 +76,4 @@ describe('something', () => {
 | `gemini.e2e.js` | the Gemini adapter as the live service behaves: request shape, thinking, retired / busy models, quotas |
 | `local-models.e2e.js` | Ollama / llama.cpp flavours: hidden reasoning, GGUF path model names, tiny context windows |
 | `composer.e2e.js` | drafts, the 20,000 character limit, copy/delete messages, header controls, Today's prompt and nudge |
+| `live-fixes.e2e.js` | what the live runs turned up: Gemini "Thinking" wording, the toolbar and model field on a phone, privacy wording, the browser's date in replies, installed local models, destructive dialogs, keys found in the environment, the on-screen keyboard |

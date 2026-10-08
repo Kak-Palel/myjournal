@@ -1,8 +1,12 @@
 // Turns an API / SSE failure into what the banner shows: wording, tone and which actions make sense.
 // Pure (no DOM): the banner component and the unit tests both use it.
 
-/** Provider error codes (ARCHITECTURE §9) where changing the settings is the likely fix. */
-const SETTINGS_CODES = new Set(['auth', 'model_not_found', 'bad_base_url', 'quota', 'region', 'context_too_long', 'network', 'blocked', 'empty']);
+/**
+ * Provider error codes (ARCHITECTURE §9) where changing the settings is the likely fix. 'overloaded', 'timeout' and 'server'
+ * are in because their hints say to switch to a lighter model or raise the timeout in Settings, and Try again alone would
+ * leave a person stuck on a model that is down (the busy flash-latest, a slow local model).
+ */
+const SETTINGS_CODES = new Set(['auth', 'model_not_found', 'bad_base_url', 'quota', 'region', 'context_too_long', 'network', 'blocked', 'empty', 'overloaded', 'timeout', 'server']);
 /** Codes where asking again right away cannot work. */
 const NO_RETRY = new Set(['ai_not_configured', 'ai_disabled', 'nothing_to_reply_to', 'not_found', 'payload_too_large']);
 

@@ -28,8 +28,10 @@ const isAbort = (err) => Boolean(err) && err.name === 'AbortError';
  * @param {AbortSignal} opts.signal aborts in-flight requests when the user leaves Settings
  * @param {() => void} [opts.onChange] called whenever dirty state changes
  * @param {(o: {activate: boolean}) => void} [opts.onSaved] called after a successful save (the setup banner listens)
+ * @param {(o: {dirty: boolean}) => void} [opts.onTested] called after a connection test that succeeded for the settings now on
+ *   screen (`dirty`: the form holds changes that are not saved yet)
  */
-export function createProviderForm({ info, app, signal, onChange, onSaved }) {
+export function createProviderForm({ info, app, signal, onChange, onSaved, onTested }) {
   const id = info.id;
   const label = info.label || PROVIDER_NAMES[id] || id;
   const presets = Array.isArray(info.presets) && info.presets.length ? info.presets : (FALLBACK_PRESETS[id] || []);
@@ -138,11 +140,13 @@ export function createProviderForm({ info, app, signal, onChange, onSaved }) {
   if (id === 'gemini') {
     thinkingSelect = h('select', { class: 'select', id: uid('thinking'), onChange: () => touched() },
       h('option', { value: 'auto' }, 'Auto (recommended)'),
-      h('option', { value: 'low' }, 'Low - faster replies'));
+      h('option', { value: 'low' }, 'Low - less thinking'));
+    // Measured against the live API: Low speeds up models that think by default (gemini-3.5-flash and up), but the default
+    // Flash-Lite does not think at all, so Low turns thinking ON there (about 465 thought tokens, first byte 2.3 s vs 0.9 s).
     thinkingRow = fieldRow({
       label: 'Thinking',
       input: thinkingSelect,
-      hint: 'Newer Gemini models can "think" before answering. Low asks them to think less, which makes replies quicker.',
+      hint: 'Low helps Flash models that think before answering (gemini-3.5-flash and up). The default Flash-Lite does not think, so Low makes it slower: leave Auto there.',
     });
   }
 
@@ -301,6 +305,7 @@ export function createProviderForm({ info, app, signal, onChange, onSaved }) {
     keyStatusEl.dataset.kind = st.kind;
     if (!st.canRemove) handFocus(removeKeyBtn, keyInput);
     removeKeyBtn.hidden = !st.canRemove;
+    if (keyGuide) keyGuide.hidden = st.kind === 'env'; // a key found in the environment: nobody needs "how to get a key"
   }
 
   function paintChips() {
@@ -521,6 +526,7 @@ export function createProviderForm({ info, app, signal, onChange, onSaved }) {
     if (res && res.ok) {
       const meta = [res.model, formatLatency(res.latencyMs)].filter(Boolean).join(' - ');
       const follow = stale ? '' : isDirty() ? 'Looks good. Press Save to keep these settings.' : isActive() ? '' : 'Looks good. Press "Use this provider" to start journaling with it.';
+      if (!stale && onTested) onTested({ dirty: isDirty() });
       mount(resultEl, card(notice({
         tone: 'success', role: 'status',
         children: [
@@ -580,5 +586,7 @@ export function createProviderForm({ info, app, signal, onChange, onSaved }) {
       }
     },
     focusFirst() { (id === 'local' ? modelInput : keyInput).focus(); },
+    /** First-run setup with a key that is already there: Test connection is the one thing left to press. */
+    emphasizeTest(on) { testBtn.classList.toggle('btn-primary', Boolean(on)); },
   };
 }

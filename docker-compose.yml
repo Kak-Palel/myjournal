@@ -45,13 +45,16 @@ services:
       # The "Local model" tab starts out pointing at the Ollama container of the "ollama" profile.
       # For an Ollama running on the host computer use http://host.docker.internal:11434/v1 instead
       # (that host's Ollama must listen on more than loopback: OLLAMA_HOST=0.0.0.0 there).
-      # These two only seed a fresh install: once you press Save in the app's settings, the saved
-      # address and model are used and changing them here no longer has any effect.
+      # These two only seed a FRESH install (no settings saved yet; the welcome screen's first choice saves them).
+      # After that the saved address and model are used and changing them here has no effect: if you add the
+      # "ollama" profile to a journal that already has saved settings, set http://ollama:11434/v1 under
+      # Settings > Local model once.
       LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-http://ollama:11434/v1}
       LOCAL_LLM_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
 
-      # The container clock is UTC. Replies and wrap-ups tell the model today's date from the server's
-      # clock, so set your time zone (for example Europe/Berlin) to have it match your day.
+      # The container clock is UTC. The web app sends your browser's date, so replies already tell the model the
+      # right "today"; this is the fallback for API clients that leave the date out. Set it to your time zone
+      # (for example Europe/Berlin) if you use such clients.
       TZ: ${TZ:-UTC}
 
       # Only needed behind a proxy that sends a different Host header than your browser's address.

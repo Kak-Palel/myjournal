@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import net from 'node:net';
+import { networkInterfaces } from 'node:os';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { startDemo } from '../../scripts/demo.js';
 import { rawRequest, sse } from './helpers.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
+const CRASH_LATER = fileURLToPath(new URL('./fixtures/crash-later.mjs', import.meta.url));
 
 describe('scripts/demo.js', () => {
   it('boots the real app with sample data and working pretend models', async () => {
@@ -110,6 +113,82 @@ describe('scripts/demo.js', () => {
       assert.equal(existsSync(dir), false);
     } finally {
       child.kill('SIGKILL');
+    }
+  });
+  /** Run scripts/demo.js as a command; resolves once it printed its address. */
+  async function startDemoProcess({ env = {}, nodeArgs = [] } = {}) {
+    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', ...nodeArgs, 'scripts/demo.js'], {
+      cwd: ROOT,
+      env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR || '', ...env },
+    });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    const exit = new Promise((resolve) => child.on('close', (code, signal) => resolve({ code, signal })));
+    const deadline = Date.now() + 15_000;
+    while (!/Open\s+http:\/\/\S+/.test(out) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    const url = /Open\s+(http:\/\/\S+)/.exec(out)?.[1];
+    assert.ok(url, `the demo printed a URL. Output so far: ${out}`);
+    const dir = /\((\/[^)]*myjournal-demo-[^)]*)\)/.exec(out)?.[1];
+    assert.ok(dir && existsSync(dir), 'the temporary folder exists while running');
+    return { child, exit, out: () => out, url, dir };
+  }
+
+  for (const signal of ['SIGHUP', 'SIGQUIT']) {
+    it(`removes its temporary data on ${signal} too (closed terminal window)`, async () => {
+      const demo = await startDemoProcess();
+      try {
+        demo.child.kill(signal);
+        const { code } = await demo.exit;
+        assert.equal(code, 0, `${signal} is handled like Ctrl+C`);
+        assert.equal(existsSync(demo.dir), false, 'the temporary folder is gone');
+      } finally {
+        demo.child.kill('SIGKILL');
+      }
+    });
+  }
+
+  it('removes its temporary data even when it dies of an uncaught exception', async () => {
+    const demo = await startDemoProcess({ nodeArgs: ['--import', CRASH_LATER], env: { CRASH_AFTER_MS: '1500' } });
+    try {
+      const { code } = await demo.exit;
+      assert.notEqual(code, 0, 'it really crashed');
+      assert.equal(existsSync(demo.dir), false, 'the temporary folder is gone');
+    } finally {
+      demo.child.kill('SIGKILL');
+    }
+  });
+
+  it('cannot be reached from the network: the app and both pretend model servers listen on 127.0.0.1 only, whatever HOST says', async () => {
+    const demo = await startDemo({ delayMs: 1 });
+    try {
+      assert.equal(demo.app.server.address().address, '127.0.0.1');
+      assert.equal(demo.openai.server.address().address, '127.0.0.1');
+      assert.equal(demo.gemini.server.address().address, '127.0.0.1');
+    } finally {
+      await demo.close();
+    }
+    // the command as people run it, with a HOST in its environment (the demo must not read it), probed from outside
+    const process_ = await startDemoProcess({ env: { HOST: '0.0.0.0', JOURNAL_PASSWORD: '', PORT: '0' } });
+    try {
+      const ports = [...process_.out().matchAll(/http:\/\/127\.0\.0\.1:(\d+)/g)].map((m) => Number(m[1]));
+      assert.ok(new Set(ports).size >= 3, `the app and two pretend servers announce their ports (${ports})`);
+      assert.ok(!/0\.0\.0\.0/.test(process_.out()));
+      const outside = Object.values(networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4' && !i.internal).map((i) => i.address);
+      for (const address of outside) {
+        for (const port of ports) {
+          const reachable = await new Promise((resolve) => {
+            const socket = net.connect({ host: address, port, timeout: 1500 });
+            socket.once('connect', () => { socket.destroy(); resolve(true); });
+            socket.once('timeout', () => { socket.destroy(); resolve(false); });
+            socket.once('error', () => resolve(false));
+          });
+          assert.equal(reachable, false, `${address}:${port} must refuse connections`);
+        }
+      }
+    } finally {
+      process_.child.kill('SIGTERM');
+      await process_.exit;
+      process_.child.kill('SIGKILL');
     }
   });
 });

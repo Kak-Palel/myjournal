@@ -159,6 +159,17 @@ function errText(err) {
   return parts.join(' ').toLowerCase();
 }
 
+/** ", and port 6000 is on it" for a URL with an explicit port, else " (6000 and 10080 are on it)". */
+function blockedPortNote(url) {
+  try {
+    const { port } = new URL(url);
+    if (port) return `, and port ${port} is on it`;
+  } catch {
+    // fall through to the generic wording
+  }
+  return ' (6000 and 10080 are on it)';
+}
+
 const CERT_CODE = /^(CERT_|UNABLE_TO_|DEPTH_ZERO_|SELF_SIGNED|ERR_TLS_|ERR_SSL_|HOSTNAME_MISMATCH)/;
 
 /**
@@ -182,7 +193,16 @@ export function networkError(err, ctx) {
       hint: 'Paste the key into Settings again. It should have no line breaks, quotes or fancy symbols.',
     });
   }
-  if (code === 'ERR_INVALID_URL' || /invalid url|unknown scheme|bad port|includes credentials|invalid (?:host|port)/.test(text)) {
+  if (/bad port/.test(text)) {
+    // fetch() refuses a fixed list of ports (the WHATWG "bad ports": 1, 7, 9, ..., 6000, 6665-6669, 10080, ...) without
+    // trying to connect. Verified on Node 22: `fetch('http://127.0.0.1:6000/')` -> TypeError 'fetch failed', cause 'bad port'.
+    return fail('bad_base_url', 'That port is blocked.', {
+      ...base,
+      hint: `Node, like web browsers, refuses to connect to a fixed list of ports${blockedPortNote(ctx.url)}. `
+        + 'Start the model server on another port, then change the address in Settings.',
+    });
+  }
+  if (code === 'ERR_INVALID_URL' || /invalid url|unknown scheme|includes credentials|invalid (?:host|port)/.test(text)) {
     return fail('bad_base_url', 'The server address is not valid.', {
       ...base,
       hint: 'Use a full address such as http://localhost:11434/v1 (without a password or query string) in Settings.',

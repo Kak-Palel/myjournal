@@ -3,7 +3,8 @@
 
 import { ProviderError } from './errors.js';
 import {
-  DEFAULT_RETRY_WAIT_MS, MAX_JSON_BODY_BYTES, autoRetryDelay, describeUrl, readChunks, readErrorBody, scopedFetch,
+  DEFAULT_RETRY_WAIT_MS, MAX_AUTO_RETRY_WAIT_MS, MAX_JSON_BODY_BYTES, autoRetryDelay, describeUrl, readChunks, readErrorBody,
+  scopedFetch,
 } from './http.js';
 import { SseOverflowError, createSseParser, decodeChunks } from './sse.js';
 
@@ -63,7 +64,10 @@ export function normalizeUsage(prompt, completion, total) {
  *  - a 2xx response is returned as is;
  *  - `adapt(status, bodyText, error)` may rewrite the request after a 400 (self-healing), at most
  *    MAX_ADAPTATIONS times; it must return true only if it actually changed something;
- *  - one automatic retry for a short 429 / any 503, after the wait the server asked for;
+ *  - one automatic retry for a short 429 / any 503, after the wait the server asked for, but only when the failed
+ *    attempt itself was quick (at most MAX_AUTO_RETRY_WAIT_MS): a 503 that took 15 s to arrive (verified live on
+ *    gemini-flash-latest under load) would otherwise double the wait before the person sees the error, and the
+ *    retry never succeeded in the 3 pairs observed;
  *  - everything else throws the mapped ProviderError.
  * The caller must not have emitted anything yet, which is why this only covers the part before the body.
  *
@@ -77,16 +81,18 @@ export function normalizeUsage(prompt, completion, total) {
  * @param {(response: Response, bodyText: string) => Error} p.mapError
  * @param {(status: number, bodyText: string, err: Error) => boolean} [p.adapt]
  * @param {number} [p.maxAdaptations]
+ * @param {() => number} [p.now] clock in milliseconds (tests)
  * @returns {Promise<{response: Response, adaptations: number}>}
  */
 export async function sendWithPolicy({
   fetchFn, url, buildInit, scope, sleepFn, retryFallbackMs = DEFAULT_RETRY_WAIT_MS, mapError, adapt,
-  maxAdaptations = MAX_ADAPTATIONS,
+  maxAdaptations = MAX_ADAPTATIONS, now = Date.now,
 }) {
   let adaptations = 0;
   let retried = false;
   for (;;) {
     scope.throwIfAborted();
+    const attemptStartedAt = now();
     const response = await scopedFetch(fetchFn, url, buildInit(), scope);
     if (response.ok) return { response, adaptations };
 
@@ -98,7 +104,7 @@ export async function sendWithPolicy({
       continue;
     }
     const wait = retried ? null : autoRetryDelay(err, retryFallbackMs);
-    if (wait === null) throw err;
+    if (wait === null || now() - attemptStartedAt > MAX_AUTO_RETRY_WAIT_MS) throw err;
     retried = true;
     scope.pause();
     try {

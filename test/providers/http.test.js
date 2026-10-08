@@ -132,6 +132,39 @@ test('networkError classifies fetch failures and always names the URL tried', ()
   assert.equal(networkError(new TypeError('terminated', { cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }) }), CTX).code, 'network');
 });
 
+test('networkError: a port that fetch refuses ("bad port") is reported as a blocked port, not as an invalid address', () => {
+  for (const provider of ['local', 'openai', 'gemini']) {
+    const err = networkError(new TypeError('fetch failed', { cause: new Error('bad port') }),
+      { provider, secrets: [], url: 'http://127.0.0.1:6000/v1/chat/completions' });
+    assert.ok(err instanceof ProviderError);
+    assert.equal(err.provider, provider);
+    assert.equal(err.code, 'bad_base_url', 'the address is what has to change');
+    assert.equal(err.message, 'That port is blocked.');
+    assert.doesNotMatch(err.message + err.hint, /not valid/i, 'no longer the generic "server address is not valid"');
+    assert.match(err.hint, /Node, like web browsers, refuses to connect to a fixed list of ports/);
+    assert.match(err.hint, /port 6000 is on it/);
+    assert.match(err.hint, /Start the model server on another port/);
+  }
+  // other messages that used to share the branch keep the generic answer
+  const generic = networkError(new TypeError('fetch failed', { cause: new Error('unknown scheme') }), CTX);
+  assert.equal(generic.message, 'The server address is not valid.');
+  // an unparseable URL still gives a sensible hint
+  const odd = networkError(new TypeError('fetch failed', { cause: new Error('bad port') }), { provider: 'local', secrets: [], url: 'nonsense' });
+  assert.equal(odd.message, 'That port is blocked.');
+  assert.match(odd.hint, /6000 and 10080/);
+});
+
+test('a real fetch() to a blocked port (6000, 10080) ends in the clear message without any connection attempt', async () => {
+  const { createProvider } = await import('../../src/providers/index.js');
+  for (const port of [6000, 10080]) {
+    const provider = createProvider('local', { baseUrl: `http://127.0.0.1:${port}/v1`, model: 'm', timeoutMs: 2000 });
+    const err = await provider.test().then(() => assert.fail('expected a rejection'), (e) => e);
+    assert.equal(err.code, 'bad_base_url', String(port));
+    assert.equal(err.message, 'That port is blocked.');
+    assert.match(err.hint, new RegExp(`port ${port} is on it`));
+  }
+});
+
 test('networkError for the local provider reminds the user to start the server', () => {
   const err = networkError(Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('x'), { code: 'ECONNREFUSED' }) }),
     { provider: 'local', secrets: [], url: 'http://localhost:11434/v1/chat/completions?key=SECRET' });

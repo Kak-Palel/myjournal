@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_CONTEXT_BUDGET, WRAPUP_CUE, buildMemoryMessages, buildMetaMessages, buildReplyMessages, buildWeeklyMessages, buildWrapUpMessages,
+  DEFAULT_CONTEXT_BUDGET, RELATED_HEADER, WRAPUP_CUE, buildMemoryMessages, buildMetaMessages, buildReplyMessages, buildWeeklyMessages, buildWrapUpMessages, closingCue,
 } from '../../src/journal/context.js';
+import { LOCALIZED } from '../../src/journal/language.js';
 import { PERSONAS } from '../../src/journal/personas.js';
 import { TEMPLATES, getTemplate } from '../../src/journal/templates.js';
 import { MESSAGE_OVERHEAD_TOKENS, estimateTokens } from '../../src/journal/tokens.js';
-import { MEMORY_EXAMPLES, parseMeta, parseMemoryLines, cleanReply } from '../../src/journal/tasks.js';
+import { MEMORY_EXAMPLES, META_EXAMPLE, parseMeta, parseMemoryLines, cleanReply } from '../../src/journal/tasks.js';
 
 // ------------------------------------------------------------------------------------------------ fixtures
 
@@ -83,7 +84,9 @@ function memoryLinesOf(system) {
   return m ? m[1].trim().split('\n').map((l) => l.slice(2)) : [];
 }
 function relatedLinesOf(system) {
-  const m = /Possibly relevant past entries \(use only if they genuinely connect\):\n((?:- [^\n]*\n?)+)/.exec(system);
+  const start = system.indexOf(`${RELATED_HEADER}\n`);
+  if (start === -1) return [];
+  const m = /^((?:- [^\n]*\n?)+)/.exec(system.slice(start + RELATED_HEADER.length + 1));
   return m ? m[1].trim().split('\n').map((l) => l.slice(2)) : [];
 }
 const systemLine1 = (result) => result.messages[0].content.split('\n')[0];
@@ -111,14 +114,23 @@ test('the exact TASK line formats are what the mock servers parse', () => {
 test('the latest user text is LAST in every task', () => {
   const messages = convo(9);
   const latest = messages[messages.length - 1].content;
-  for (const task of ['reply', 'wrapup', 'meta', 'memory']) {
+  for (const task of ['reply', 'memory']) {
     const last = build(task, { messages }).messages.at(-1);
     assert.equal(last.role, 'user', task);
     assert.ok(last.content.endsWith(latest), `${task}: last message must end with the latest user text`);
   }
+  // meta and wrap-up end with a one-line instruction after the text (small models obey what they read last)
+  for (const task of ['meta', 'wrapup']) {
+    const last = build(task, { messages }).messages.at(-1);
+    assert.equal(last.role, 'user', task);
+    assert.ok(last.content.includes(latest), `${task}: the latest user text is in the last message`);
+    assert.ok(last.content.indexOf(latest) + latest.length < last.content.length, `${task}: followed by the instruction`);
+  }
   const weekly = build('weekly').messages.at(-1);
   assert.equal(weekly.role, 'user');
-  assert.match(weekly.content.split('\n').at(-1), /^- Wed 8 Oct|^- Thu 8 Oct|Entry title/, 'the newest entry line is last');
+  const blocks = weekly.content.split('\n\n');
+  assert.match(blocks.at(-2).split('\n').at(-1), /^- Wed 8 Oct|^- Thu 8 Oct|Entry title/, 'the newest entry line is the last entry');
+  assert.match(blocks.at(-1), /^Write my weekly reflection now/, 'the closing instruction comes last');
 });
 
 test('inputs are never mutated', () => {
@@ -150,10 +162,11 @@ test('reply prompt: persona, date, profile, memories, related entries, then the 
   assert.ok(system.includes(PERSONAS[0].prompt));
   assert.ok(system.includes('Today is Thursday, 8 October 2026.'));
   assert.ok(system.includes("The user's name is Sam."));
-  assert.ok(system.includes('About Sam: Nurse on night shifts. Two cats.'));
+  assert.ok(system.includes('Background about Sam (do not mention it unless it is relevant): Nurse on night shifts. Two cats.'));
+  assert.ok(system.includes(`${RELATED_HEADER}\n- (Oct 3)`));
   assert.ok(system.includes('Mood the user logged for this entry: Low (2 of 5).'));
   assert.ok(system.includes('Things you know about Sam:\n- Has a younger sister called Maya\n- Works night shifts'));
-  assert.ok(system.includes('Possibly relevant past entries (use only if they genuinely connect):\n- (Oct 3) Tense handover: Felt unheard by a colleague.'));
+  assert.ok(system.includes(`${RELATED_HEADER}\n- (Oct 3) Tense handover: Felt unheard by a colleague.`));
   const idx = (needle) => system.indexOf(needle);
   assert.ok(idx(PERSONAS[0].prompt) < idx('Today is') && idx('Today is') < idx('Things you know') && idx('Things you know') < idx('Possibly relevant') && idx('Possibly relevant') < idx('Rules'));
   assert.deepEqual(messages.slice(1), [{ role: 'user', content: 'Rough shift today.' }]);
@@ -167,13 +180,13 @@ test('reply rules cover the shared base rule set', () => {
   }
 });
 
-test('the instruction part of the system prompt stays within ~350 tokens', () => {
+test('the instruction part of the system prompt stays within ~380 tokens (reply) and ~460 (wrap-up)', () => {
   for (const persona of PERSONAS) {
     const settings = { persona: { id: persona.id, custom: '' }, ai: { contextBudgetTokens: 3000 } };
     for (const task of ['reply', 'wrapup']) {
       const fn = task === 'reply' ? buildReplyMessages : buildWrapUpMessages;
       const { messages } = fn({ settings, entry: {}, messages: [{ role: 'user', content: 'hi' }], memories: [], related: [] });
-      assert.ok(estimateTokens(messages[0].content) <= 350, `${task}/${persona.id}: ${estimateTokens(messages[0].content)} tokens`);
+      assert.ok(estimateTokens(messages[0].content) <= (task === 'reply' ? 380 : 460), `${task}/${persona.id}: ${estimateTokens(messages[0].content)} tokens`);
     }
   }
   for (const task of ['meta', 'memory']) {
@@ -196,7 +209,7 @@ test('profile: missing name or about is simply omitted', () => {
   const sys = (profile) => buildReplyMessages({ settings: { profile, ai: { contextBudgetTokens: 3000 } }, messages: [{ role: 'user', content: 'x' }], memories: [{ text: 'Has a cat' }] }).messages[0].content;
   const noName = sys({ name: '', about: 'Likes tea.' });
   assert.ok(!noName.includes("The user's name"));
-  assert.ok(noName.includes('About the user: Likes tea.'));
+  assert.ok(noName.includes('Background about the user (do not mention it unless it is relevant): Likes tea.'));
   assert.ok(noName.includes('Things you know about the user:'));
   const none = sys({});
   assert.ok(!none.includes('About '));
@@ -310,7 +323,7 @@ test('joiners that are part of the spelling survive in the prompt (Persian ZWNJ,
   const out = buildReplyMessages({ settings: settingsFor(), entry: {}, messages: [{ role: 'user', content: `${persian} ${family}` }], now: NOW });
   assert.equal(out.messages.at(-1).content, `${persian} ${family}`);
   const meta = buildMetaMessages({ settings: settingsFor(), entry: {}, messages: [{ role: 'user', content: persian }] });
-  assert.ok(meta.messages.at(-1).content.endsWith(persian));
+  assert.ok(meta.messages.at(-1).content.includes(persian));
 });
 
 test('a conversation that ends with an assistant turn is returned as-is and flagged', () => {
@@ -624,14 +637,21 @@ test('wrap-up: closing-reflection rules, no question, last message is the user t
   assert.ok(!system.includes('ONE open follow-up question'), 'the reply rules do not leak into the wrap-up');
   assert.ok(system.includes('Today is Thursday, 8 October 2026.'));
   assert.ok(system.includes('Things you know about Sam:'));
-  assert.equal(r.messages.at(-1).content, messages.at(-1).content, 'ends with the user text when the conversation does');
-  assert.equal(r.messages.length, 1 + messages.length);
+  assert.match(system, /Speak to the user as "you"/);
+  assert.match(system, /Profile notes, memories and earlier entries are background: mention one only when it clearly connects\. Call an earlier entry an earlier entry, and never present background as something the user said today/);
+  assert.match(system, /Do not invent details/);
+  // The conversation ends with the user's text: the closing cue is part of that last turn, so it is the last thing read.
+  const lastText = messages.at(-1).content;
+  assert.equal(r.messages.at(-1).role, 'user');
+  assert.equal(r.messages.at(-1).content, `${lastText}\n\n${closingCue({ code: 'en', name: 'English' })}`);
+  assert.equal(r.messages.length, 1 + messages.length, 'no extra turn');
+  assert.equal(r.debug.cue, true);
 });
 
 test('wrap-up of a conversation that ends with an assistant turn appends a user cue', () => {
   const messages = convo(6);
   const r = buildWrapUpMessages({ settings: settingsFor(), entry: {}, messages, now: NOW });
-  assert.deepEqual(r.messages.at(-1), { role: 'user', content: WRAPUP_CUE });
+  assert.deepEqual(r.messages.at(-1), { role: 'user', content: closingCue({ code: 'en', name: 'English' }) });
   assert.equal(r.messages.at(-2).role, 'assistant');
   assert.equal(r.debug.droppedMessages, 0);
   assert.equal(r.debug.endsWithAssistant, false, 'only meaningful for reply');
@@ -647,7 +667,7 @@ test('wrap-up fits tight budgets and drops the oldest turns first', () => {
   for (const budget of [500, 900, 2000]) {
     const r = buildWrapUpMessages({ settings: settingsFor(budget), entry: {}, messages, memories: memoriesOf(10), related: relatedOf(4), now: NOW });
     assert.ok(r.debug.approxTokens <= budget, `${budget}`);
-    assert.equal(r.messages.at(-1).content, messages.at(-1).content);
+    assert.ok(r.messages.at(-1).content.endsWith(closingCue({ code: 'en', name: 'English' })), 'the cue always survives');
     if (r.debug.droppedMessages > 0) assert.equal(r.debug.memoriesUsed + r.debug.relatedUsed, 0);
   }
 });
@@ -670,12 +690,27 @@ test('meta: asks for exactly the four labelled lines parseMeta reads, with the e
   assert.match(system, /exactly four lines/);
   assert.match(system, /language of the entry/);
   assert.equal(r.messages[1].role, 'user');
-  assert.equal(r.messages[1].content, 'Journal entry:\n\nThe argument with Dan about money.\n\nThat I am proud of him.');
+  assert.equal(r.messages[1].content, 'Journal entry:\n\nThe argument with Dan about money.\n\nThat I am proud of him.\n\nNow write the four lines (Title, Summary, Emotions, Tags) for this entry.');
   assert.ok(!r.messages[1].content.includes('That sounds heavy'), 'assistant turns are left out');
   assert.ok(!/\{|\}|json/i.test(system), 'never JSON');
-  // The example in the prompt round-trips through the parser.
-  const example = system.split('\n').filter((l) => /^(?:Title|Summary|Emotions|Tags): /.test(l)).join('\n');
-  assert.equal(parseMeta(example, { userText: 'cycling in the rain, rainy bike ride home' }).title, 'Rainy bike ride home');
+  // The format is shown with placeholders, never with an example a small model would copy (llama3.2:1b copied it in 15 of 17 entries).
+  const formatLines = system.split('\n').filter((l) => /^(?:Title|Summary|Emotions|Tags): /.test(l));
+  assert.equal(formatLines.length, 4);
+  for (const line of formatLines) assert.match(line, /: <[^>]+>$/, line);
+  assert.ok(!system.includes(META_EXAMPLE.title) && !system.includes(META_EXAMPLE.summary), 'no example entry in the prompt');
+  // If a model echoes the format lines, nothing of them ends up in the entry.
+  const echoed = parseMeta(formatLines.join('\n'), { userText: 'The argument with Dan about money.', fallbackTitle: 'Money talk' });
+  assert.equal(echoed.title, 'Money talk');
+  assert.ok(!/[<>]|words|sentences/.test(`${echoed.summary} ${echoed.emotions} ${echoed.tags}`), JSON.stringify(echoed));
+});
+
+test('meta: a non-English entry gets its language named in the reminder; the labels stay English for the parser', () => {
+  const es = buildMetaMessages({ entry: {}, messages: [{ role: 'user', content: 'Hoy fue un día largo. Mi jefa me pidió terminar el informe antes del viernes y no dormí bien.' }], settings: settingsFor() });
+  assert.ok(es.messages[1].content.endsWith('Keep the four labels in English and write the rest in Spanish.'));
+  const en = buildMetaMessages({ entry: {}, messages: [{ role: 'user', content: 'Today was a long day and I did not sleep well at all.' }], settings: settingsFor() });
+  assert.ok(!/Keep the four labels/.test(en.messages[1].content));
+  const unknown = buildMetaMessages({ entry: {}, messages: [{ role: 'user', content: 'ok' }], settings: settingsFor() });
+  assert.ok(!/Keep the four labels/.test(unknown.messages[1].content));
 });
 
 test('meta: guided entries mention the exercise; empty entries still build; long entries are cut in the middle', () => {
@@ -683,13 +718,13 @@ test('meta: guided entries mention the exercise; empty entries still build; long
   assert.ok(guided.messages[0].content.includes('This entry came from a guided exercise: Dream journal.'));
   assert.equal(guided.messages[0].content.split('\n')[0], 'TASK: meta');
   const empty = buildMetaMessages({ entry: {}, messages: [], settings: settingsFor() });
-  assert.equal(empty.messages[1].content, 'Journal entry:\n\n(empty entry)');
+  assert.equal(empty.messages[1].content, 'Journal entry:\n\n(empty entry)\n\nNow write the four lines (Title, Summary, Emotions, Tags) for this entry.');
   const long = `START ${'word '.repeat(20000)} END`;
   for (const budget of [500, 1500]) {
     const r = buildMetaMessages({ entry: {}, messages: [{ role: 'user', content: long }], settings: settingsFor(budget) });
     assert.ok(r.debug.approxTokens <= budget);
     assert.ok(r.messages[1].content.startsWith('Journal entry:\n\nSTART'));
-    assert.ok(r.messages[1].content.endsWith('END'));
+    assert.ok(/END\n\nNow write the four lines/.test(r.messages[1].content), 'the end of the entry and the reminder both survive');
     assert.equal(r.debug.truncatedLastUser, true);
   }
 });
@@ -711,14 +746,24 @@ test('memory: rules, existing memories as a do-not-repeat list, and the "none" e
   assert.ok(!none.messages[0].content.includes('Already known'));
 });
 
-test('memory: the example facts in the prompt are the ones parseMemoryLines refuses to accept as copies', () => {
+test('memory: the prompt has no example facts to copy, and parseMemoryLines still refuses them if a model produces them', () => {
   const system = buildMemoryMessages({ settings: settingsFor(), entry: {}, messages: [{ role: 'user', content: 'I went for a walk.' }], existingMemories: [] }).messages[0].content;
   assert.ok(MEMORY_EXAMPLES.length >= 3);
+  assert.match(system, /Write each fact as: - <short fact>\./);
   for (const { fact, rare } of MEMORY_EXAMPLES) {
-    assert.ok(system.includes(`- ${fact}\n`) || system.includes(`- ${fact}`), fact);
-    assert.deepEqual(parseMemoryLines(`- ${fact}`, { userText: 'I went for a walk and thought about nothing much.' }), [], `${fact} copied from the prompt`);
+    // 1B models echoed the examples (31 of 51 bullets from llama3.2:1b, 63 of 72 from smollm2:360m), so there are none.
+    assert.ok(!system.includes(fact), `${fact} must not be in the prompt`);
+    assert.deepEqual(parseMemoryLines(`- ${fact}`, { userText: 'I went for a walk and thought about nothing much.' }), [], `${fact} copied from a model's habits`);
     assert.ok(fact.toLowerCase().includes(rare), `${rare} is a word of the example`);
   }
+});
+
+test('memory: the language of the entry is named (or asked for neutrally)', () => {
+  const es = buildMemoryMessages({ entry: {}, messages: [{ role: 'user', content: 'Mi hermana Lucía vino de visita desde Sevilla y pasamos el sábado cocinando.' }], existingMemories: [], settings: settingsFor() }).messages[0].content;
+  assert.match(es, /\nWrite the facts in Spanish\.\n/);
+  assert.ok(es.endsWith('reply with exactly: none'));
+  const unknown = buildMemoryMessages({ entry: {}, messages: [{ role: 'user', content: 'ok' }], existingMemories: [], settings: settingsFor() }).messages[0].content;
+  assert.match(unknown, /\nWrite the facts in the same language as the entry\.\n/);
 });
 
 test('memory: existing memories are dropped before the entry text is cut', () => {
@@ -890,4 +935,206 @@ test('TASK_SAMPLING forces a low temperature for the structured tasks only', asy
   assert.ok(TASK_SAMPLING.meta.maxTokens >= 100 && TASK_SAMPLING.memory.maxTokens >= 100);
   assert.equal(TASK_SAMPLING.reply, undefined, 'replies use the user\'s own temperature');
   assert.ok(Object.isFrozen(TASK_SAMPLING));
+});
+
+// ------------------------------------------------------------------------------------------------ prompt tuning (live-measured fixes)
+
+const ES_TEXT = 'Hoy fue un día largo. Mi jefa me pidió terminar el informe antes del viernes y no dormí bien. Por la tarde fui a caminar con mi perro por el parque.';
+const FR_TEXT = "Aujourd'hui j'ai enfin parlé à mon père au téléphone après des mois de silence. Il a ri en parlant de mon enfance à Lyon.";
+const JA_TEXT = '今日は仕事が忙しくて、昼ごはんを食べる時間もありませんでした。帰り道に妹と電話して、少し元気が出ました。';
+
+test('a free-write prompt never says "This is a guided session." (the guidance object is always truthy)', () => {
+  for (const entry of [{}, { templateId: null }, { templateId: undefined, mood: 3 }, { templateId: 'no-such-template' }]) {
+    for (const budget of [3000, 600, 400]) {
+      const r = buildReplyMessages({ settings: settingsFor(budget), entry, messages: [{ role: 'user', content: 'A normal day.' }], memories: memoriesOf(2), related: relatedOf(1), now: NOW });
+      assert.ok(!/guided session/i.test(r.messages[0].content), `${JSON.stringify(entry)} at ${budget}`);
+    }
+  }
+  // A guided session still gets its guidance; a bare templateGuidance (no known template) is used as given and adds no fixed sentence.
+  const guided = buildReplyMessages({ settings: settingsFor(), entry: { templateId: 'gratitude' }, messages: [{ role: 'user', content: 'x' }] });
+  assert.ok(guided.messages[0].content.includes(getTemplate('gratitude').guidance));
+  const bare = buildReplyMessages({ settings: settingsFor(), entry: {}, messages: [{ role: 'user', content: 'x' }], templateGuidance: 'Only guidance.' });
+  assert.ok(bare.messages[0].content.includes('Only guidance.'));
+  assert.ok(!bare.messages[0].content.includes('This is a guided session.'));
+});
+
+test('reply rules: background facts only when related, no invented details, and the language is named when it is clear', () => {
+  const en = build('reply', { messages: [{ role: 'user', content: 'Today was a long day and I did not sleep well at all.' }] }).messages[0].content;
+  assert.match(en, /Profile notes, memories and earlier entries are background: mention one only when it directly relates to what the user just wrote\./);
+  assert.match(en, /Do not invent details \(times, places, events\) that the user did not mention\./);
+  assert.match(en, /- Write in the language the user writes in\./, 'English keeps the neutral wording');
+  const es = build('reply', { messages: [{ role: 'user', content: ES_TEXT }] }).messages[0].content;
+  assert.match(es, /- Write in Spanish, the language the user writes in\./);
+  const ja = build('reply', { messages: [{ role: 'user', content: JA_TEXT }] }).messages[0].content;
+  assert.match(ja, /- Write in Japanese, the language the user writes in\./);
+  // Too short to tell ("ok"): the neutral wording, unless an earlier message of the user settles it.
+  const ok = build('reply', { messages: [{ role: 'user', content: 'ok' }] }).messages[0].content;
+  assert.match(ok, /- Write in the language the user writes in\./);
+  const after = build('reply', { messages: [{ role: 'user', content: ES_TEXT }, { role: 'assistant', content: '¿Qué te pesó más?' }, { role: 'user', content: 'ok' }] }).messages[0].content;
+  assert.match(after, /Write in Spanish/);
+  // The latest message decides when the person switches language.
+  const switched = build('reply', { messages: [{ role: 'user', content: ES_TEXT }, { role: 'assistant', content: '¿Qué te pesó más?' }, { role: 'user', content: 'Thanks, I feel better now and I will try to sleep early tonight.' }] }).messages[0].content;
+  assert.match(switched, /- Write in the language the user writes in\./);
+  assert.equal(buildReplyMessages({ settings: settingsFor(), entry: {}, messages: [{ role: 'user', content: ES_TEXT }, { role: 'assistant', content: '¿Qué te pesó más?' }, { role: 'user', content: 'Thanks, I feel better now and I will try to sleep early tonight.' }] }).debug.language, 'en');
+  assert.equal(build('reply', { messages: [{ role: 'user', content: ES_TEXT }] }).debug.language, 'es');
+});
+
+test('the compact and minimal prompts keep the background, invention and language rules in short form', () => {
+  const r = buildReplyMessages({ settings: settingsFor(380), entry: {}, messages: [{ role: 'user', content: ES_TEXT }], memories: memoriesOf(3), related: relatedOf(2), now: NOW });
+  assert.equal(r.debug.compact, true);
+  assert.match(r.messages[0].content, /Write in Spanish\./);
+  assert.match(r.messages[0].content, /Mention background notes only when they directly relate\. Invent nothing\./);
+  const w = buildWrapUpMessages({ settings: settingsFor(380), entry: {}, messages: [{ role: 'user', content: ES_TEXT }, { role: 'assistant', content: '¿Qué te pesó más?' }], now: NOW });
+  assert.equal(w.debug.compact, true);
+  assert.match(w.messages[0].content, /Speak to the user as "you"/);
+  assert.match(w.messages[0].content, /Write in Spanish\./);
+});
+
+test('earlier entries are introduced as background that must be called an earlier entry', () => {
+  assert.match(RELATED_HEADER, /^Possibly relevant past entries/);
+  assert.match(RELATED_HEADER, /earlier entry/);
+  assert.match(RELATED_HEADER, /background/);
+  const r = buildWrapUpMessages({ settings: settingsFor(), entry: {}, messages: convo(3), related: relatedOf(1), now: NOW });
+  assert.ok(r.messages[0].content.includes(`${RELATED_HEADER}\n- (Sep 10) Earlier entry 0:`));
+});
+
+test('closing cue: the user\'s language when it is known, the English cue plus the language name or a neutral line otherwise', () => {
+  for (const [code, { closing }] of Object.entries(LOCALIZED)) assert.equal(closingCue({ code, name: code }), closing, code);
+  assert.match(closingCue({ code: 'xx', name: 'Klingon' }), /^That is all for now\..* Write it in Klingon\.$/);
+  assert.equal(closingCue(null), WRAPUP_CUE);
+  assert.match(WRAPUP_CUE, /Use the language I have been writing in\.$/);
+  for (const { closing } of Object.values(LOCALIZED)) {
+    assert.ok(closing.length > 40 && !/\n/.test(closing));
+  }
+  const cueOf = (text, ending = 'assistant') => {
+    const messages = [{ role: 'user', content: text }];
+    if (ending === 'assistant') messages.push({ role: 'assistant', content: 'Reply.' });
+    return buildWrapUpMessages({ settings: settingsFor(), entry: {}, messages, now: NOW }).messages.at(-1).content;
+  };
+  assert.equal(cueOf(ES_TEXT), LOCALIZED.es.closing);
+  assert.equal(cueOf(FR_TEXT), LOCALIZED.fr.closing);
+  assert.equal(cueOf(JA_TEXT), LOCALIZED.ja.closing);
+  assert.equal(cueOf('ok'), WRAPUP_CUE);
+  // Conversation ends with the user: the same cue ends their last turn.
+  assert.equal(cueOf(ES_TEXT, 'user'), `${ES_TEXT}\n\n${LOCALIZED.es.closing}`);
+  assert.equal(cueOf('ok', 'user'), `ok\n\n${WRAPUP_CUE}`);
+});
+
+test('wrap-up on an empty conversation adds no cue and does not throw', () => {
+  const r = buildWrapUpMessages({ settings: settingsFor(), entry: {}, messages: [], now: NOW });
+  assert.equal(r.messages.length, 1);
+  assert.equal(r.debug.cue, false);
+});
+
+test('local providers drop old turns in blocks of 8, so the start of the history is the same for several requests in a row', () => {
+  const full = convo(120, { chars: 200 });
+  const firstKept = (providerId, budget = 1800) => {
+    const out = [];
+    for (let n = 1; n <= full.length; n += 2) { // a request after each user message
+      const r = buildReplyMessages({ settings: settingsFor(budget), entry: {}, messages: full.slice(0, n), now: NOW, providerId });
+      assert.ok(r.debug.approxTokens <= budget, `${providerId} ${n}`);
+      assert.equal(r.messages[0].role, 'system');
+      assert.equal(r.messages.at(-1).content, full[n - 1].content.trim(), 'the latest user message is always sent');
+      const first = full.findIndex((m) => m.content.trim() === r.messages[1].content);
+      assert.equal(r.debug.droppedMessages, first, 'droppedMessages counts the dropped prefix');
+      out.push({ n, first, kept: r.messages.length - 1 });
+    }
+    return out;
+  };
+  const local = firstKept('local');
+  const dropping = local.filter((x) => x.first > 0);
+  assert.ok(dropping.length > 20);
+  assert.ok(dropping.every((x) => x.first % 8 === 0), `local: ${dropping.map((x) => x.first)}`);
+  let longest = 1;
+  let run = 1;
+  for (let i = 1; i < local.length; i += 1) {
+    run = local[i].first === local[i - 1].first ? run + 1 : 1;
+    longest = Math.max(longest, run);
+  }
+  assert.ok(longest >= 3, `the same first message is kept for at least 3 requests in a row: ${local.map((x) => x.first)}`);
+  assert.ok(local.every((x, i) => i === 0 || x.first >= local[i - 1].first), 'the start only ever moves forward');
+  // Hosted providers keep as much as fits: the start moves with every extra turn.
+  const gemini = firstKept('gemini');
+  assert.ok(gemini.some((x) => x.first % 8 !== 0), `gemini: ${gemini.map((x) => x.first)}`);
+  assert.ok(new Set(gemini.map((x) => x.first)).size > new Set(local.map((x) => x.first)).size);
+  // The price is bounded: a local conversation keeps at least 60 % of what a sliding window would.
+  for (let i = 0; i < local.length; i += 1) assert.ok(local[i].kept >= gemini[i].kept * 0.6 - 0.5, `${local[i].n}: ${local[i].kept} vs ${gemini[i].kept}`);
+});
+
+test('a small budget uses smaller blocks, so it does not lose most of its history', () => {
+  const full = convo(60, { chars: 400 });
+  for (const budget of [900, 1200, 1600]) {
+    for (let n = 1; n <= full.length; n += 2) {
+      const local = buildReplyMessages({ settings: settingsFor(budget), entry: {}, messages: full.slice(0, n), now: NOW, providerId: 'local' });
+      const sliding = buildReplyMessages({ settings: settingsFor(budget), entry: {}, messages: full.slice(0, n), now: NOW, providerId: 'gemini' });
+      assert.ok(local.debug.approxTokens <= budget);
+      assert.ok(local.messages.length - 1 >= (sliding.messages.length - 1) * 0.6 - 0.5, `${budget}/${n}: ${local.messages.length} vs ${sliding.messages.length}`);
+      assert.ok(local.messages.length >= 2);
+    }
+  }
+});
+
+test('block-wise dropping never removes the latest user message, even when the blocks are bigger than the conversation', () => {
+  const messages = convo(5, { chars: 1500 });
+  for (const budget of [300, 500, 800]) {
+    const r = buildReplyMessages({ settings: settingsFor(budget), entry: {}, messages, now: NOW, providerId: 'local' });
+    assert.ok(r.messages.length >= 2, `${budget}`);
+    assert.equal(r.messages[0].role, 'system');
+    assert.equal(r.messages.at(-1).role, 'user');
+    assert.ok(r.debug.approxTokens <= budget);
+    assert.ok(r.messages.at(-1).content.startsWith('Message number 4'));
+  }
+});
+
+test('a reply that was stopped after a few characters is not part of the context; a longer stopped reply is', () => {
+  const stopped = (content) => ({ role: 'assistant', content, meta: { kind: 'reply', stopped: true } });
+  const short = buildReplyMessages({ settings: settingsFor(), entry: {}, messages: [{ role: 'user', content: 'First thing.' }, stopped('That'), { role: 'user', content: 'Second thing.' }], now: NOW });
+  assert.deepEqual(short.messages.slice(1), [{ role: 'user', content: 'First thing.\n\nSecond thing.' }]);
+  const long = 'That sounds like a really heavy morning for you';
+  const kept = buildReplyMessages({ settings: settingsFor(), entry: {}, messages: [{ role: 'user', content: 'First thing.' }, stopped(long), { role: 'user', content: 'Second thing.' }], now: NOW });
+  assert.deepEqual(kept.messages.slice(1).map((m) => m.role), ['user', 'assistant', 'user']);
+  // A short reply that finished is kept: only stopped fragments are noise.
+  const done = buildReplyMessages({ settings: settingsFor(), entry: {}, messages: [{ role: 'user', content: 'First thing.' }, { role: 'assistant', content: 'Oh.', meta: { kind: 'reply' } }, { role: 'user', content: 'Second thing.' }], now: NOW });
+  assert.deepEqual(done.messages.slice(1).map((m) => m.role), ['user', 'assistant', 'user']);
+});
+
+test('weekly: the prompt ends with a seeded opening in the language of the entries, so the reflection speaks to "you"', () => {
+  const last = (entries) => buildWeeklyMessages({ entries, settings: settingsFor(), periodStart: '2026-10-02', periodEnd: '2026-10-08' }).messages[1].content.split('\n\n').at(-1);
+  assert.equal(last(weeklyEntries(4)), `Write my weekly reflection now, as my companion. Start exactly with: "${LOCALIZED.en.weeklyLead}"`);
+  const es = [
+    { date: '2026-10-05', title: 'Día largo con el informe', summary: 'Un día agotador por el informe del trabajo; un paseo con el perro ayudó.' },
+    { date: '2026-10-06', title: 'Querer hablar con Pablo', summary: 'Quiere hablar con su hermano Pablo después de semanas sin noticias.' },
+  ];
+  assert.equal(last(es), `Write my weekly reflection now, as my companion, in Spanish. Start exactly with: "${LOCALIZED.es.weeklyLead}"`);
+  // The app's own English words ("mood", "feelings") do not make Spanish entries English.
+  assert.equal(last(es.map((e) => ({ ...e, mood: 3, emotions: ['calm'], tags: ['work'] }))), last(es));
+  // Unclear language: no English seed (it would pull the answer into English), a neutral line instead.
+  assert.equal(last([{ date: '2026-10-05', title: 'Ok', summary: '' }]), 'Write my weekly reflection now, as my companion, speaking to me as "you", in the language of my entries.');
+  assert.ok(Object.values(LOCALIZED).every((l) => /^\*\*[^*]+\*\* .+/.test(l.weeklyLead)), 'every seed opens with a bold lead-in');
+});
+
+test('weekly: the closing instruction survives every budget step', () => {
+  for (const budget of [500, 700, 1200]) {
+    const r = buildWeeklyMessages({ entries: weeklyEntries(40, { summaryChars: 500 }), memories: memoriesOf(8), settings: settingsFor(budget), periodStart: '2026-10-01', periodEnd: '2026-10-08' });
+    assert.ok(r.debug.approxTokens <= budget, `${budget}`);
+    assert.match(r.messages[1].content, /Start exactly with: "\*\*How the week felt\.\*\* In these entries, you"$/);
+  }
+});
+
+test('hosted prompts label the profile and earlier entries as background; local prompts keep the plain, shorter labels', () => {
+  const args = { settings: settingsFor(), entry: {}, messages: [{ role: 'user', content: 'A normal day.' }], memories: memoriesOf(1), related: relatedOf(1), now: NOW };
+  for (const providerId of ['gemini', 'openai', undefined]) {
+    const system = buildReplyMessages({ ...args, providerId }).messages[0].content;
+    assert.match(system, /^Background about Sam \(do not mention it unless it is relevant\): Nurse on night shifts\. Two cats\.$/m, String(providerId));
+    assert.ok(system.includes(`${RELATED_HEADER}\n`), String(providerId));
+  }
+  const local = buildReplyMessages({ ...args, providerId: 'local' }).messages[0].content;
+  assert.match(local, /^About Sam: Nurse on night shifts\. Two cats\.$/m);
+  assert.ok(local.includes('Possibly relevant past entries (use only if they genuinely connect):\n'));
+  assert.ok(!local.includes('do not mention it unless'));
+  // The memory block keeps one label everywhere.
+  for (const providerId of ['gemini', 'local']) assert.match(buildReplyMessages({ ...args, providerId }).messages[0].content, /^Things you know about Sam:$/m);
+  // The wrap-up behaves the same way.
+  assert.match(buildWrapUpMessages({ ...args, providerId: 'local' }).messages[0].content, /^About Sam: /m);
+  assert.match(buildWrapUpMessages({ ...args, providerId: 'gemini' }).messages[0].content, /^Background about Sam /m);
 });

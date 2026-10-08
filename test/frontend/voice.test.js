@@ -541,12 +541,27 @@ describe('entry-errors', () => {
     }
     assert.equal(describeProblem({ code: 'auth' }, { providerId: 'nonsense' }).settings.href, '#/settings?tab=general');
   });
-  test('transient provider errors retry without settings', () => {
-    for (const code of ['rate_limit', 'overloaded', 'timeout', 'server', 'unknown']) {
+  test('a plain rate limit or an unknown failure retries without settings', () => {
+    for (const code of ['rate_limit', 'unknown']) {
       const p = describeProblem({ code, message: 'm' }, { source: 'stream' });
       assert.equal(p.settings, null, code);
       assert.equal(p.retry, true, code);
     }
+  });
+  test('overloaded, timeout and server errors offer Try again AND the way into Settings (on the active provider tab)', () => {
+    for (const code of ['overloaded', 'timeout', 'server']) {
+      const p = describeProblem({ code, message: 'm', hint: 'switch model in Settings' }, { providerId: 'gemini', source: 'stream' });
+      assert.equal(p.retry, true, code);
+      assert.deepEqual(p.settings, { href: '#/settings?tab=gemini', label: 'Open settings' }, code);
+      assert.equal(p.hint, 'switch model in Settings', code);
+      assert.equal(describeProblem({ code }, { providerId: 'local' }).settings.href, '#/settings?tab=local', code);
+      assert.equal(describeProblem({ code }).settings.href, '#/settings?tab=general', code);
+    }
+    assert.equal(describeProblem({ code: 'overloaded' }).tone, 'warn');
+    assert.equal(describeProblem({ code: 'server' }).tone, 'error');
+  });
+  test('the browser being unable to reach our own server still offers no settings link', () => {
+    for (const code of ['network']) assert.equal(describeProblem({ code, status: 0 }, { source: 'http' }).settings, null);
   });
   test('our own server being unreachable differs from the provider being unreachable', () => {
     const own = describeProblem({ code: 'network', status: 0, message: 'Could not reach the MyJournal server.', hint: 'Is it running?' });

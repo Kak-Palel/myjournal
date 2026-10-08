@@ -173,6 +173,8 @@ class Diagnostics {
     this.expectedStatuses = [];
     /** @type {RegExp[]} */
     this.allowedConsole = [];
+    /** @type {RegExp[]} */
+    this.allowedFailedRequests = [];
     this.allowDialogTypes = new Set(['beforeunload']);
 
     page.on('console', (msg) => {
@@ -216,6 +218,11 @@ class Diagnostics {
     this.allowedConsole.push(pattern);
   }
 
+  /** Declare that requests that fail at the network level ("METHOD url - error") matching `pattern` are part of the scenario (a stopped server). */
+  allowFailedRequests(pattern) {
+    this.allowedFailedRequests.push(pattern);
+  }
+
   /** Allow a native dialog type (alert/confirm/prompt are NOT expected anywhere in this app). */
   allowDialog(type) {
     this.allowDialogTypes.add(type);
@@ -244,7 +251,7 @@ class Diagnostics {
       if (!this.#matchesExpected(r.status, r.path)) out.push(`unexpected HTTP ${r.status}: ${r.method} ${r.path}`);
     }
     if (!this.allowExternal) for (const x of this.external) out.push(`the browser contacted a third party: ${x}`);
-    for (const f of this.failedRequests) out.push(`request failed: ${f}`);
+    for (const f of this.failedRequests) if (!this.allowedFailedRequests.some((re) => re.test(f))) out.push(`request failed: ${f}`);
     for (const d of this.dialogs) {
       if (!this.allowDialogTypes.has(d.type)) out.push(`native ${d.type} dialog opened: ${d.message}`);
     }
@@ -277,6 +284,11 @@ export const PASSWORD = 'correct horse battery staple';
  * @property {boolean} [configureMocks] point the three providers' saved settings at the mocks (default true unless `fresh`)
  * @property {object} [settings] extra settings patch (deep-merged last)
  * @property {string} [password] start the app with JOURNAL_PASSWORD
+ * @property {object} [config] server configuration overrides (for example a fixed `port` when a test stops and restarts the server)
+ * @property {Record<string, string>} [env] the server's environment (what `process.env` is to a real run). Only these variables exist
+ *     for the app, never the developer's own shell: GEMINI_API_KEY, OPENAI_API_KEY, LOCAL_LLM_API_KEY, ...
+ * @property {boolean} [keysInEnv] the mocks' API keys are NOT saved in Settings but handed over in the environment instead
+ *     (GEMINI_API_KEY / OPENAI_API_KEY), as when somebody starts the app with their keys exported
  * @property {'demo'|((db: object) => void)|null} [seed] fill the journal before the browser opens
  * @property {{ width: number, height: number }} [viewport] default 1280x800
  * @property {'light'|'dark'} [colorScheme] default 'light'
@@ -313,8 +325,10 @@ export async function journey(options, fn) {
     const configure = o.configureMocks ?? !o.fresh;
     const providers = {};
     if (configure && mocks.local) providers.local = { baseUrl: mocks.local.baseUrl, model: 'llama3.2:3b' };
-    if (configure && mocks.openai) providers.openai = { baseUrl: mocks.openai.baseUrl, model: 'mock-model', apiKey: OPENAI_KEY };
-    if (configure && mocks.gemini) providers.gemini = { baseUrl: mocks.gemini.url, apiKey: GEMINI_KEY };
+    const saved = (key) => (o.keysInEnv ? {} : { apiKey: key });
+    if (configure && mocks.openai) providers.openai = { baseUrl: mocks.openai.baseUrl, model: 'mock-model', ...saved(OPENAI_KEY) };
+    if (configure && mocks.gemini) providers.gemini = { baseUrl: mocks.gemini.url, ...saved(GEMINI_KEY) };
+    const serverEnv = { ...(o.keysInEnv && mocks.openai ? { OPENAI_API_KEY: OPENAI_KEY } : {}), ...(o.keysInEnv && mocks.gemini ? { GEMINI_API_KEY: GEMINI_KEY } : {}), ...(o.env || {}) };
     const settings = {};
     if (!o.fresh) settings.onboarded = o.onboarded ?? true;
     else if (o.onboarded) settings.onboarded = true;
@@ -327,7 +341,10 @@ export async function journey(options, fn) {
     app = await startApp({
       ai: false,
       settings: merged,
-      config: o.password ? { password: o.password } : {},
+      // E2E_PUBLIC_DIR serves another copy of public/ (for example the one from an older commit) to prove that a regression
+      // test fails on the old frontend and passes on the new one.
+      config: { ...(process.env.E2E_PUBLIC_DIR ? { publicDir: resolve(process.env.E2E_PUBLIC_DIR) } : {}), ...(o.password ? { password: o.password } : {}), ...(o.config || {}) },
+      env: serverEnv,
     });
     closers.push(() => app.close());
     if (o.seed === 'demo') seedSampleJournal(app.db);

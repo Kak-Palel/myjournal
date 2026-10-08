@@ -2,8 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_SETTINGS,
+  DEFAULT_TIMEOUT_SEC,
   PERSONA_IDS,
   PROVIDER_IDS,
+  SETTINGS_LIMITS,
   THINKING_MODES,
   applyEnvSeed,
   defaultSettings,
@@ -29,7 +31,7 @@ test('DEFAULT_SETTINGS has exactly the shape of ARCHITECTURE section 5', () => {
       temperature: 0.7,
       maxTokens: 700,
       contextBudgetTokens: 3000,
-      timeoutSec: 120,
+      timeoutSec: 180,
       providers: {
         gemini: { baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-flash-lite-latest', thinking: 'auto', apiKey: '' },
         openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', apiKey: '' },
@@ -41,7 +43,22 @@ test('DEFAULT_SETTINGS has exactly the shape of ARCHITECTURE section 5', () => {
   assert.ok(Object.isFrozen(DEFAULT_SETTINGS) && Object.isFrozen(DEFAULT_SETTINGS.ai.providers.local));
 });
 
-test('Gemini defaults and thinking modes follow the live-verified contract', () => {
+test('the default first-byte timeout is one number, 180 s: enough for a cold local model, inside the validated range', () => {
+  assert.equal(DEFAULT_TIMEOUT_SEC, 180);
+  assert.equal(DEFAULT_SETTINGS.ai.timeoutSec, 180);
+  assert.ok(DEFAULT_SETTINGS.ai.timeoutSec >= SETTINGS_LIMITS.timeoutSec.min && DEFAULT_SETTINGS.ai.timeoutSec <= SETTINGS_LIMITS.timeoutSec.max);
+  assert.equal(normalizeSettings({}).ai.timeoutSec, 180);
+  assert.equal(normalizeSettings({ ai: { timeoutSec: 'soon' } }).ai.timeoutSec, 180, 'garbage falls back to the default');
+  // validation is unchanged: 5..600, clamped; and 120 (the old default) stays a valid choice
+  assert.deepStrictEqual({ ...SETTINGS_LIMITS.timeoutSec }, { min: 5, max: 600 });
+  assert.equal(mergeSettings(DEFAULT_SETTINGS, { ai: { timeoutSec: 120 } }).settings.ai.timeoutSec, 120);
+  // a document saved by an earlier build keeps its explicit number
+  assert.equal(normalizeSettings({ ai: { timeoutSec: 120 } }).ai.timeoutSec, 120);
+  // the provider layer's own fallbacks agree
+  for (const id of PROVIDER_IDS) assert.equal(PROVIDER_DEFAULTS[id].timeoutMs, DEFAULT_SETTINGS.ai.timeoutSec * 1000, id);
+});
+
+test('Gemini defaults and thinking modes follow the documented contract (docs/ARCHITECTURE.md section 9)', () => {
   const gemini = DEFAULT_SETTINGS.ai.providers.gemini;
   assert.equal(gemini.model, 'gemini-flash-lite-latest');
   assert.equal(gemini.thinking, 'auto');
@@ -413,7 +430,7 @@ test('isProviderConfigured', () => {
   assert.equal(isProviderConfigured(DEFAULT_SETTINGS, none, 'constructor'), false);
 });
 
-test('applyEnvSeed seeds only values that still equal the default', () => {
+test('applyEnvSeed puts the environment\'s URL and model into the settings it is given (the caller decides that this is a fresh install)', () => {
   const env = { OPENAI_BASE_URL: 'https://openrouter.ai/api/v1/', LOCAL_LLM_BASE_URL: 'http://localhost:8080/v1', LOCAL_LLM_MODEL: 'qwen2.5:1.5b' };
   const seeded = applyEnvSeed(DEFAULT_SETTINGS, env);
   assert.equal(seeded.ai.providers.openai.baseUrl, 'https://openrouter.ai/api/v1');
@@ -422,15 +439,30 @@ test('applyEnvSeed seeds only values that still equal the default', () => {
   assert.equal(seeded.ai.providers.gemini.baseUrl, DEFAULT_SETTINGS.ai.providers.gemini.baseUrl);
   assert.deepStrictEqual(DEFAULT_SETTINGS.ai.providers.local, { baseUrl: 'http://localhost:11434/v1', model: 'llama3.2:3b', apiKey: '' }, 'input untouched');
 
-  // user-chosen values win, even over a different env value
-  const custom = mergeSettings(DEFAULT_SETTINGS, { ai: { providers: { local: { baseUrl: 'http://lan:1234/v1', model: 'phi3' }, openai: { baseUrl: 'https://api.groq.com/openai/v1' } } } }).settings;
-  const kept = applyEnvSeed(custom, env);
-  assert.equal(kept.ai.providers.local.baseUrl, 'http://lan:1234/v1');
-  assert.equal(kept.ai.providers.local.model, 'phi3');
-  assert.equal(kept.ai.providers.openai.baseUrl, 'https://api.groq.com/openai/v1');
-
   // idempotent
   assert.deepStrictEqual(applyEnvSeed(seeded, env), seeded);
+  // everything that is not a seeded field stays as given
+  const custom = mergeSettings(DEFAULT_SETTINGS, { profile: { name: 'Sam' }, ai: { temperature: 1.2, providers: { local: { apiKey: 'lk-1234567890' } } } }).settings;
+  const withEnv = applyEnvSeed(custom, env);
+  assert.equal(withEnv.profile.name, 'Sam');
+  assert.equal(withEnv.ai.temperature, 1.2);
+  assert.equal(withEnv.ai.providers.local.apiKey, 'lk-1234567890');
+});
+
+test('applyEnvSeed has no "equals the built-in default" heuristic any more: it seeds what it is given, WHEN is the caller\'s decision', () => {
+  // The old heuristic treated "still equals the default" as "never chosen" and replaced it on EVERY read, so a person could
+  // not pick http://localhost:11434/v1 on purpose while LOCAL_LLM_BASE_URL was set. Seeding now happens only while no
+  // settings document exists (loadEffectiveSettings, see test/server/env-seed.test.js for the whole flow).
+  const env = { LOCAL_LLM_BASE_URL: 'http://ollama:11434/v1', LOCAL_LLM_MODEL: 'qwen2.5:1.5b' };
+  const chosen = mergeSettings(DEFAULT_SETTINGS, { ai: { providers: { local: { baseUrl: 'http://lan:1234/v1', model: 'phi3' } } } }).settings;
+  const seeded = applyEnvSeed(chosen, env);
+  assert.equal(seeded.ai.providers.local.baseUrl, 'http://ollama:11434/v1');
+  assert.equal(seeded.ai.providers.local.model, 'qwen2.5:1.5b');
+  assert.equal(chosen.ai.providers.local.baseUrl, 'http://lan:1234/v1', 'the input is not modified');
+  // validation accepts the built-in default as a deliberate choice
+  const explicitDefault = mergeSettings(seeded, { ai: { providers: { local: { baseUrl: 'http://localhost:11434/v1' } } } });
+  assert.deepStrictEqual(explicitDefault.errors, {});
+  assert.equal(explicitDefault.settings.ai.providers.local.baseUrl, 'http://localhost:11434/v1');
 });
 
 test('applyEnvSeed ignores empty and invalid environment values', () => {

@@ -14,6 +14,7 @@ import { createLiveBubble, createPhaseStepper } from '../components/entry-live.j
 import { renderBanner } from '../components/entry-banner.js';
 import { renderSummary } from '../components/entry-summary.js';
 import { describeProblem } from '../components/entry-errors.js';
+import { replyBody, wrapUpBody } from '../components/entry-request.js';
 import { createRevealer, isNearBottom, announcementExcerpt } from '../components/entry-stream.js';
 import { removeDraft, draftKey } from '../components/entry-draft.js';
 import { isSafetyMessage, trailingMessage } from '../components/entry-thread.js';
@@ -452,7 +453,7 @@ export default async function entryView(ctx) {
     const retryReply = () => runReply({ regenerate: replyIsLast() });
 
     try {
-      const res = await api.stream(`${base}/reply`, { regenerate }, { signal: ctl.signal, onEvent });
+      const res = await api.stream(`${base}/reply`, replyBody(regenerate), { signal: ctl.signal, onEvent });
       if (!alive()) return;
       if (res.aborted) {
         await finishStopped(received, reveal);
@@ -594,7 +595,7 @@ export default async function entryView(ctx) {
     };
 
     try {
-      const res = await api.stream(`${base}/wrap-up`, {}, { signal: ctl.signal, onEvent });
+      const res = await api.stream(`${base}/wrap-up`, wrapUpBody(), { signal: ctl.signal, onEvent });
       if (!alive()) return;
       if (res.aborted) {
         reveal.cancel();

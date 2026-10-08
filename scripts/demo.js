@@ -301,8 +301,18 @@ async function main() {
     await demo.close();
     process.exit(0);
   }
-  process.on('SIGINT', stop);
-  process.on('SIGTERM', stop);
+  // Ctrl+C, a plain kill, and also a closed terminal window (SIGHUP) or Ctrl+\ (SIGQUIT): all of them must remove the
+  // temporary data. (SIGKILL and a power cut cannot be handled by anybody.)
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) process.on(signal, stop);
+  // Last resort for every other way out (an exception that nothing caught, an unexpected process.exit): delete the
+  // folder synchronously. A no-op when close() already did it.
+  process.once('exit', () => {
+    try {
+      rmSync(demo.dir, { recursive: true, force: true });
+    } catch {
+      // nothing more can be done while exiting
+    }
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

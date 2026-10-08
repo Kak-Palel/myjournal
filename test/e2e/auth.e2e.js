@@ -11,10 +11,10 @@ async function signIn(page, password = PASSWORD) {
 }
 
 describe('password protected journal', () => {
-  // Confirmed in the browser (repeatable): with a password set, boot() starts the router on the requested route BEFORE it
-  // redirects to #/login, so Today's data requests (catalog, entries, overview) run unauthenticated. Every one that is not
-  // aborted in time shows up as "Failed to load resource ... 401" in the console on every cold start of a protected journal.
-  test('opening a protected journal while logged out goes straight to the login screen without failed requests', { skip: 'BUG: public/js/app.js boot() - router.start() renders the requested route (Today) before redirecting to #/login, so its API calls 401 and log console errors; fix: history.replaceState(null, "", "#/login") before router.start() when auth is required and the visitor is not authenticated' }, () => journey({
+  // Regression: with a password set, boot() used to start the router on the requested route BEFORE it redirected to #/login,
+  // so Today's data requests (catalog, entries, overview) ran unauthenticated and logged "Failed to load resource ... 401" in the
+  // console on every cold start of a protected journal. The sign-in page is now shown before any page is resolved.
+  test('opening a protected journal while logged out goes straight to the login screen without failed requests', () => journey({
     name: 'auth-cold-start-noise', password: PASSWORD,
   }, async (j) => {
     const { page, diag } = j;
@@ -105,11 +105,11 @@ describe('password protected journal', () => {
     assert.ok(!(await page.locator('body').innerText()).includes('Miso'));
   }));
 
-  test('the session ending while the page is open leads back to the login screen', () => journey({
+  test('the session ending while the page is open leads to the login screen and, after signing in again, back to the same page', () => journey({
     name: 'auth-expiry', password: PASSWORD, seed: 'demo',
   }, async (j) => {
     const { page, context, diag } = j;
-    diag.expectStatus(401, /\/api\//);
+    diag.expectStatus(401, /\/api\//); // the request that finds out the session is gone
     await j.goto('/');
     await signIn(page);
     await ui.todayBox(page).waitFor();
@@ -119,16 +119,100 @@ describe('password protected journal', () => {
     await page.getByRole('link', { name: 'History', exact: true }).first().click();
     await ui.heading(page, 'Welcome back', 1).waitFor();
     assert.match(page.url(), /#\/login/);
-    // and signing in again brings the journal back
+    // and signing in again brings back the page that was open, not Today
+    await signIn(page);
+    await ui.heading(page, 'History', 1).waitFor();
+    assert.match(page.url(), /#\/history$/);
+    assert.equal(await ui.todayBox(page).count(), 0);
+  }));
+
+  test('the session ending on a page with filters or an open entry: sign in brings back the same address and the typed words', () => journey({
+    name: 'auth-expiry-deep', password: PASSWORD, seed: 'demo',
+  }, async (j) => {
+    const { page, context, diag, db } = j;
+    diag.expectStatus(401, /\/api\//);
+    const entry = db.entries.list({ limit: 50 }).find((e) => e.title === 'Long run in the rain');
+
+    // a filtered History
+    await j.goto('/history?mood=4');
+    await signIn(page);
+    await ui.heading(page, 'History', 1).waitFor();
+    await page.waitForLoadState('networkidle');
+    assert.match(page.url(), /#\/history\?mood=4$/);
+    await context.clearCookies();
+    await page.reload(); // the next request finds out
+    await ui.heading(page, 'Welcome back', 1).waitFor();
+    assert.match(page.url(), /#\/login$/);
+    await signIn(page);
+    await ui.heading(page, 'History', 1).waitFor();
+    assert.match(page.url(), /#\/history\?mood=4$/, 'the filter is still in the address');
+
+    // an entry with an unsent message: pressing Send after the session ended
+    await j.goto(`/entry/${entry.id}`);
+    await ui.mine(page).first().waitFor();
+    await ui.entryBox(page).fill('Words typed while the session had already ended.');
+    await context.clearCookies();
+    await ui.button(page, 'Send').click();
+    await ui.heading(page, 'Welcome back', 1).waitFor();
+    assert.equal(db.messages.list(entry.id).some((m) => m.content.includes('Words typed while the session')), false, 'nothing was saved without a session');
+    await signIn(page);
+    await ui.mine(page).first().waitFor();
+    assert.match(page.url(), new RegExp(`#/entry/${entry.id}$`));
+    assert.equal(await ui.entryBox(page).inputValue(), 'Words typed while the session had already ended.', 'the draft survived the sign-in');
+  }));
+
+  for (const [label, path] of [
+    ['a filtered History', '/history?mood=4'],
+    ['an entry', null],
+    ['Settings on its Data tab', '/settings?tab=data'],
+    ['Memory', '/memory'],
+    ['Insights', '/insights'],
+  ]) {
+    test(`a deep link to ${label} opened while logged out shows the login screen quietly and returns there after signing in`, () => journey({
+      name: `auth-deep-link-${label.replace(/\W+/g, '-').toLowerCase()}`, password: PASSWORD, seed: 'demo',
+    }, async (j) => {
+      const { page, db, diag } = j;
+      const target = path || `/entry/${db.entries.list({ limit: 50 }).find((e) => e.title === 'Presentation day').id}`;
+      await j.load(target);
+      await ui.heading(page, 'Welcome back', 1).waitFor();
+      await page.waitForTimeout(400);
+      assert.match(page.url(), /#\/login$/);
+      assert.deepEqual(diag.problems(), [], 'no unauthenticated API call, no console error');
+      const text = await page.locator('body').innerText();
+      assert.ok(!text.includes('Miso') && !text.includes('Presentation day'), 'no journal content before signing in');
+
+      // a wrong password does not lose the intended address
+      diag.expectStatus(401, /\/api\/auth\/login/);
+      await signIn(page, 'not the password');
+      await page.getByRole('alert').filter({ hasText: 'That password is not right.' }).waitFor();
+      await signIn(page);
+      await page.waitForURL((url) => url.hash === `#${target}`);
+      await ui.heading(page, /./).first().waitFor();
+      assert.equal(await ui.todayBox(page).count(), 0, 'not Today');
+      assert.equal(await login(page).count(), 0);
+    }));
+  }
+
+  test('signing out on purpose and signing back in starts at Today', () => journey({
+    name: 'auth-sign-out-then-in', password: PASSWORD, seed: 'demo',
+  }, async (j) => {
+    const { page, diag } = j;
+    diag.expectStatus(401, /\/api\//);
+    await j.goto('/settings?tab=data');
+    await signIn(page);
+    await page.getByRole('heading', { name: 'Access' }).waitFor();
+    await ui.button(page, 'Sign out').click();
+    await ui.heading(page, 'Welcome back', 1).waitFor();
     await signIn(page);
     await ui.todayBox(page).waitFor();
+    assert.match(page.url(), /#\/$/);
   }));
 
   test('too many wrong passwords are slowed down with an honest message', () => journey({
     name: 'auth-rate-limit', password: PASSWORD,
   }, async (j) => {
     const { page, diag } = j;
-    diag.expectStatus(401, /\/api\//); // includes the first-load noise described in the BUG test below
+    diag.expectStatus(401, /\/api\/auth\/login/); // every wrong password answers 401
     diag.expectStatus(429, /\/api\/auth\/login/);
     await j.goto('/');
     await ui.heading(page, 'Welcome back', 1).waitFor();
@@ -149,7 +233,6 @@ describe('password protected journal', () => {
     name: 'auth-csrf', password: PASSWORD,
   }, async (j) => {
     const { page, diag } = j;
-    diag.expectStatus(401, /\/api\//); // first-load noise, see the BUG test below
     diag.expectStatus(403, /\/api\//);
     await j.goto('/');
     await signIn(page);

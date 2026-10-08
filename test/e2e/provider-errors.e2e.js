@@ -100,6 +100,8 @@ describe('provider errors while replying', () => {
     await ui.button(page, 'Send').click();
     const problem = banner(page, 'Try again');
     await problem.waitFor();
+    // a server error may be a model that is too big for the machine: the way to another model is offered, not just "again"
+    assert.match(await problem.getByRole('link', { name: 'Open settings' }).getAttribute('href'), /#\/settings\?tab=local$/);
     assert.equal(db.messages.list(id).filter((m) => m.role === 'user').length, 2, 'both messages are saved');
     assert.equal(await ui.entryBox(page).inputValue(), '', 'the box is empty because the text is safe');
     await problem.getByRole('button', { name: 'Try again' }).click();
@@ -151,6 +153,8 @@ describe('provider errors while replying', () => {
     const problem = banner(page, 'Try again');
     await problem.waitFor({ timeout: 20_000 });
     await problem.getByText(/time|wait|load|slow|longer/i).first().waitFor();
+    // the hint says to raise the timeout or pick a smaller model: both live in Settings
+    assert.match(await problem.getByRole('link', { name: 'Open settings' }).getAttribute('href'), /#\/settings\?tab=local$/);
     assert.ok(await ui.button(page, 'Get a reply').isVisible(), 'the page is usable again');
   }));
 });

@@ -171,6 +171,35 @@ test('settings.get returns defaults on a fresh database, as a fresh copy each ti
   db.close();
 });
 
+test('settings.exists() is false until the first save, false again after a wipe with settings, and ignores unreadable documents', () => {
+  const t = scratchDir('settings-exists');
+  try {
+    let db = openDb({ file: t.file });
+    assert.equal(db.settings.exists(), false, 'a fresh database has no settings document');
+    db.settings.get(); // reading does not create one
+    assert.equal(db.settings.exists(), false);
+    db.settings.set({ onboarded: true });
+    assert.equal(db.settings.exists(), true);
+    db.close();
+    db = openDb({ file: t.file });
+    assert.equal(db.settings.exists(), true, 'survives a reopen');
+    db.wipe();
+    assert.equal(db.settings.exists(), true, 'a wipe keeps the settings by default');
+    db.wipe({ includeSettings: true });
+    assert.equal(db.settings.exists(), false, 'and a wipe with settings makes the install fresh again');
+    // an unreadable document does not count: the install is treated as fresh until the next save repairs it
+    db.handle.prepare("INSERT INTO settings (key, value) VALUES ('app', ?)").run('{not json');
+    assert.equal(db.settings.exists(), false);
+    db.handle.prepare("UPDATE settings SET value = ? WHERE key = 'app'").run('"a string"');
+    assert.equal(db.settings.exists(), false);
+    db.settings.set({ onboarded: true });
+    assert.equal(db.settings.exists(), true);
+    db.close();
+  } finally {
+    t.cleanup();
+  }
+});
+
 test('settings.set / get round trip with normalisation', () => {
   const db = memDb();
   const { settings } = mergeSettings(db.settings.get(), { onboarded: true, profile: { name: 'Sam' }, ai: { provider: 'local', providers: { openai: { apiKey: 'sk-secretkey-1234' } } } });

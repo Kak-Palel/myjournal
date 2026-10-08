@@ -74,6 +74,10 @@ export function createLoginLimiter({ max, windowMs, now = Date.now }) {
     reset(ip) {
       failures.delete(ip);
     },
+    /** Addresses currently tracked (tests: the table must stay bounded). */
+    get size() {
+      return failures.size;
+    },
   };
 }
 

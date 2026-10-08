@@ -2,6 +2,8 @@
 import { h, mount } from './lib/dom.js';
 import { api, ApiError } from './lib/api.js';
 import { createRouter, parseHash } from './lib/router.js';
+import { returnAddress, postLoginHash } from './lib/return-to.js';
+import { watchKeyboardInset } from './lib/keyboard-inset.js';
 import { icon, toast, spinner, todayString } from './lib/ui.js';
 import { createConnectionMonitor, createConnectionBanner, probeHealth } from './components/connection.js';
 
@@ -228,6 +230,7 @@ async function boot() {
 
   const { shell, view, setActive, connHost } = buildShell();
   watchConnection({ shell, view, connHost });
+  watchKeyboardInset(); // lifts the entry page's writing box above an on-screen keyboard that does not resize the page (iOS)
 
   router = createRouter({
     routes: routes.map(({ path, load }) => ({ path, load })),
@@ -244,7 +247,11 @@ async function boot() {
   });
 
   window.addEventListener('myjournal:unauthorized', () => {
-    if (!location.hash.startsWith('#/login')) router.navigate('/login', { replace: true }); // signing in again starts at Today
+    // The session ended while the page was open (it expired, or the server was restarted): show the sign-in page, remember
+    // where the person was so they come back to it (several requests can fail at once; only the first sees a real page).
+    if (parseHash().path === '/login') return;
+    intendedHash = returnAddress(location.hash);
+    router.navigate('/login', { replace: true });
   });
 
   mount(rootEl, shell);
@@ -253,7 +260,7 @@ async function boot() {
     // Go to the sign-in page BEFORE the router resolves anything: the page that was asked for would otherwise render
     // first, fail its API calls with 401 and only then be replaced. After signing in the person lands where they were headed.
     if (parseHash().path !== '/login') {
-      intendedHash = location.hash;
+      intendedHash = returnAddress(location.hash);
       history.replaceState(null, '', '#/login');
     }
     await router.start(); // startAuthenticated() runs once the login view succeeds
@@ -273,11 +280,8 @@ export async function startAuthenticated() {
     if (err instanceof ApiError && err.code === 'unauthorized') return;
     toast(err.message || 'Could not load settings', { kind: 'error' });
   }
-  let target = null; // a replacement address, when the current one is not where the person should land
-  if (parseHash().path === '/login') target = intendedHash && !intendedHash.startsWith('#/login') ? intendedHash : '#/';
+  const target = postLoginHash({ current: location.hash, intended: intendedHash, onboarded: !app.settings || Boolean(app.settings.onboarded) });
   intendedHash = '';
-  const path = target ? parseHash(target).path : parseHash().path;
-  if (app.settings && !app.settings.onboarded && path === '/') target = '#/welcome';
   if (target) history.replaceState(null, '', target);
   await router.start(); // idempotent: registers the hashchange listener once, then resolves the route
 }

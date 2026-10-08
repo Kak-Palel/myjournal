@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PROVIDER_DEFAULTS, PROVIDER_IDS, resolveProviderConfig, withProviderDefaults } from '../../src/providers/config.js';
 import { ProviderError } from '../../src/providers/errors.js';
+import { DEFAULT_SETTINGS, DEFAULT_TIMEOUT_SEC, defaultSettings } from '../../src/settings.js';
 
 const settings = (over = {}) => ({
   ai: {
@@ -26,6 +27,20 @@ test('resolves a full settings document', () => {
     id: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-flash-lite-latest', apiKey: '', keySource: 'none',
     timeoutMs: 120000, thinking: 'auto', temperature: 0.7, maxTokens: 700,
   });
+});
+
+test('one timeout default for every provider: a fresh install allows a cold local model 180 s, not the old 120 s that shadowed it', () => {
+  assert.equal(DEFAULT_TIMEOUT_SEC, 180);
+  assert.equal(DEFAULT_SETTINGS.ai.timeoutSec, 180);
+  for (const id of PROVIDER_IDS) {
+    assert.equal(PROVIDER_DEFAULTS[id].timeoutMs, 180_000, `${id} fallback`);
+    // what a fresh install really sends to the adapter
+    assert.equal(resolveProviderConfig(id, defaultSettings(), {}).timeoutMs, 180_000, `${id} from default settings`);
+  }
+  // an explicit choice still wins, within the clamp
+  const custom = defaultSettings();
+  custom.ai.timeoutSec = 240;
+  assert.equal(resolveProviderConfig('local', custom, {}).timeoutMs, 240_000);
 });
 
 test('a saved key wins over the environment, the environment fills the gap', () => {

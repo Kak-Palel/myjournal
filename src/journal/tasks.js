@@ -7,6 +7,7 @@
 //   parseMemoryLines(text, { existing })  -> string[]  (0-3 durable facts)
 //   detectEmotions(text, max)             -> string[]  (lexicon scan; also the fallback of parseMeta)
 
+import { detectLanguage } from './language.js';
 import {
   capitalize, cleanText, firstSentences, firstWords, normalizeLabels, oneLine, splitSentences, truncate,
 } from './text.js';
@@ -289,7 +290,10 @@ export function detectEmotions(text, max = 3) {
 // ------------------------------------------------------------------------------------------------
 // parseMeta
 
-/** Example output used in the meta prompt (context.js). A copy of it is rejected by parseMeta. */
+/**
+ * The example output the meta prompt used to show. The prompt now shows placeholders instead (1B models copied the example
+ * verbatim), but a copy of this example is still rejected by parseMeta, as are the placeholders themselves.
+ */
 export const META_EXAMPLE = Object.freeze({
   title: 'Rainy bike ride home',
   summary: 'Got soaked cycling home but felt free and cheerful by the end.',
@@ -391,16 +395,26 @@ function parseJsonish(text) {
 }
 
 // Instructions echoed back as the value ("a title of 2 to 6 words", "1 to 4 feelings").
-const PLACEHOLDER_RE = /\b\d\s*(?:to|-|–)\s*\d\s*(?:words?|sentences?|feelings?|topics?|emotions?|tags?)\b|\b(?:one|two) (?:or (?:one|two|three) )?short sentences?\b|^\W*(?:a|the) (?:title|summary)\b|\bcomma[- ]separated\b/i;
+const PLACEHOLDER_RE = /\b\d\s*(?:to|-|–)\s*\d\s*(?:words?|sentences?|feelings?|topics?|emotions?|tags?)\b|\b(?:one|two) (?:or (?:one|two|three) )?short sentences?\b|^\W*(?:a|the) (?:title|summary)\b|\bcomma[- ]separated\b|\bseparated by commas?\b/i;
 
 const EMPTY_VALUE_RE = /^(?:none|n\/a|na|nil|null|nothing|unknown|not (?:applicable|available|specified|mentioned|provided)|no (?:title|summary|emotions?|tags?|feelings?)|untitled|-+|\.+|tbd|\?+)$/i;
 
 /** Comparison form for "is this the example?": no case, wrapping quotes or trailing full stop. */
 const sameKey = (s) => String(s).toLowerCase().replace(/^[\s"'“”`*]+|[\s.!"'“”`*]+$/gu, '').trim();
 
+/**
+ * `<A quiet day>`: the prompt shows the format in angle brackets, so a model sometimes keeps them around its answer. Only
+ * plain words are unwrapped; anything that looks like markup (`<img src=x>`) is the person's or the model's text and stays.
+ * An empty placeholder (`<title>`, `<summary>`) is nothing.
+ */
+const unwrapAngles = (s) => {
+  if (/^<\s*(?:title|summary|emotions?|tags?|feelings?|topics?)\s*>$/i.test(s)) return '';
+  return s.replace(/^<\s*([^<>=/"']*?\s[^<>=/"']*?)\s*>$/, '$1');
+};
+
 function titleValue(raw, invented) {
   if (typeof raw !== 'string') return '';
-  let s = cleanValue(raw).replace(/^(?:title|titre|título|titel)\s*[:：-]\s*/iu, '');
+  let s = unwrapAngles(cleanValue(raw)).replace(/^(?:title|titre|título|titel)\s*[:：-]\s*/iu, '');
   s = s.replace(/^#+\s*/, '').replace(/[.:;,\s]+$/u, '').replace(/^["“'`]+|["”'`]+$/gu, '').trim();
   if (s === '' || EMPTY_VALUE_RE.test(s) || PLACEHOLDER_RE.test(s) || looksLikeRefusal(s) || /^title$/i.test(s)) return '';
   if (invented && invented.title && sameKey(s) === sameKey(invented.title)) return '';
@@ -410,7 +424,7 @@ function titleValue(raw, invented) {
 
 function summaryValue(raw, invented) {
   if (typeof raw !== 'string') return '';
-  const s = cleanValue(raw).replace(/^(?:summary|resumen|résumé|resumo|zusammenfassung)\s*[:：-]\s*/iu, '');
+  const s = unwrapAngles(cleanValue(raw)).replace(/^(?:summary|resumen|résumé|resumo|zusammenfassung)\s*[:：-]\s*/iu, '');
   if (s === '' || EMPTY_VALUE_RE.test(s) || PLACEHOLDER_RE.test(s) || looksLikeRefusal(s)) return '';
   if (invented && invented.summary && sameKey(s) === sameKey(invented.summary)) return '';
   const sentences = splitSentences(s);
@@ -420,7 +434,7 @@ function summaryValue(raw, invented) {
 
 function listItems(raw) {
   // "anxious (7/10), relieved (a little)": intensities and asides are not part of the label.
-  const text = typeof raw === 'string' ? raw.replace(/\s*\([^)]*\)/g, '') : raw;
+  const text = typeof raw === 'string' ? unwrapAngles(raw.trim()).replace(/\s*\([^)]*\)/g, '') : raw;
   if (typeof text === 'string' && EMPTY_VALUE_RE.test(cleanValue(text))) return [];
   const parts = Array.isArray(text) ? text : typeof text === 'string' ? text.split(/[,;|\n•，；、]|\s\/\s|\s+(?:and|y|et|und|e)\s+(?=\p{L})/iu) : [];
   const out = [];
@@ -453,15 +467,38 @@ function tagsValue(raw) {
   return normalizeLabels(items, { max: 5, maxLen: 24 });
 }
 
+// Guided exercises start their entries with a label ("Situation: ...", "Rose: ...", "Automatic thought: ..."). It is the
+// template's, not the person's, so it must not become the title.
+const LEADING_LABEL_RE = /^\p{L}[\p{L}']*(?: \p{L}[\p{L}']*){0,2}:\s+(?=\S)/u;
+const stripLeadingLabel = (text) => {
+  const stripped = text.replace(LEADING_LABEL_RE, '');
+  return Array.from(stripped).length >= 8 ? stripped : text;
+};
+// A title must not end on "and that" or "of the": drop such words after the cut.
+const DANGLING_END_RE = /\s+(?:and|or|but|that|which|who|the|a|an|of|to|in|on|at|for|with|from|by|my|our|your|his|her|their|because|when|while|if|as|than|then|so|is|was|were|are|am|i|i'm|about|after|before|over|into|around|between|through|during|until|without|within|against|toward|towards|y|e|o|de|la|el|que|con|en|et|le|les|des|un|une|du)$/i;
+
+/** A sentence cut to a title: at the first clause break when there is one, else at a word, never on a dangling word. */
+function titleFromSentence(sentence) {
+  const text = stripLeadingLabel(sentence);
+  if (Array.from(text).length <= 60) return text;
+  const clause = /[,;:—–]|\s-\s/.exec(text);
+  let cut = clause && clause.index >= 12 && clause.index <= 60 ? text.slice(0, clause.index) : firstWords(text, 48);
+  for (let i = 0; i < 4; i += 1) {
+    const next = cut.replace(DANGLING_END_RE, '');
+    if (next === cut) break;
+    cut = next;
+  }
+  return cut;
+}
+
 /** The caller's fallback title, else the first sentence of the first message (cut at a word if long). */
 function fallbackTitleFrom(fallbackTitle, firstMessage) {
   const fb = typeof fallbackTitle === 'string' ? cleanValue(fallbackTitle) : '';
   let base = fb;
   if (base === '') {
-    const sentence = firstSentences(firstMessage, { maxChars: 400, maxSentences: 1, minChars: 1 });
-    base = Array.from(sentence).length <= 60 ? sentence : firstWords(sentence, 48);
+    base = titleFromSentence(firstSentences(firstMessage, { maxChars: 400, maxSentences: 1, minChars: 1 }));
   }
-  return capitalize(base.replace(/[.:;,\s]+$/u, ''));
+  return capitalize(base.replace(/[.:;,\s。、]+$/u, ''));
 }
 
 /**
@@ -505,7 +542,7 @@ export function parseMeta(text, { fallbackTitle = '', userText = '', firstMessag
   if (title === '') title = fallbackTitleFrom(fallbackTitle, firstMessage || source);
 
   let summary = summaryValue(pickField('summary'), invented);
-  if (summary === '' && source !== '') summary = firstSentences(source, { maxChars: 200, maxSentences: 2, minChars: 60 });
+  if (summary === '' && source !== '') summary = capitalize(firstSentences(stripLeadingLabel(source.trimStart()), { maxChars: 200, maxSentences: 2, minChars: 60 }));
 
   // The example's own feelings and topics ("cheerful, free" / "cycling, weather") are dropped unless the entry names every one of them.
   const isCopiedList = (labels, example) => {
@@ -526,9 +563,10 @@ export function parseMeta(text, { fallbackTitle = '', userText = '', firstMessag
 // parseMemoryLines
 
 /**
- * The example facts shown in the memory prompt (context.js), each with the word that makes it specific. A model that
- * echoes an example has told us nothing about the entry, so parseMemoryLines drops such a line unless the entry
- * itself contains that word.
+ * The example facts the memory prompt used to show, each with the word that makes it specific. The prompt no longer has
+ * examples (1B models echoed them: 31 of 51 bullets from llama3.2:1b), but a model can still write them out of habit. An
+ * echoed example has told us nothing about the entry, so parseMemoryLines drops such a line unless the entry itself
+ * contains the example's distinctive word and every other distinctive word of the fact.
  */
 export const MEMORY_EXAMPLES = Object.freeze([
   Object.freeze({ fact: 'Has a younger sister called Maya', rare: 'maya' }),
@@ -581,6 +619,46 @@ const EMOTION_STATE_RE = /^(?:is |was |feels? |felt |seems? |sounds? |appears? |
 const FEELING_STATE_RE = /^(?:se siente|se sent[ií]a|sinti[óo]|est[aá]|estaba|se sent|se sentait|f[üu]hlt sich|f[üu]hlte sich|sente-se|sentiu-se|has felt\b|has been (?:feeling|having an? |so |very |really |quite |a bit |a little |too )|has had an? (?:hard|bad|rough|tough|long|great|good|nice|lovely|terrible|awful|stressful|busy|quiet|lazy|difficult|productive|boring|slow|crazy|weird) (?:day|night|week|morning|afternoon|evening|weekend|time|start)\b|is struggling with (?:sleep|motivation) (?:lately|recently)|needs to (?:rest|relax|sleep|breathe|calm|vent|cry|slow down|unwind|recharge|take a break|take it easy)|wants to (?:rest|relax|sleep|vent|cry|unwind|recharge|take a break|take it easy)|needs (?:more |some |a lot of |lots of )?(?:sleep|rest|a break|a nap|a hug|a holiday|a vacation|space|time off|time|coffee|food|water|a drink|a day off)\b|wants (?:to )?(?:quit|give up|run away|scream|hide|escape|be alone|go home|go to bed|stay in bed|cry|vent)\b|wants (?:a break|out)\b)/i;
 const SENSITIVE_RE = /\b(?:password|passcode|pin code|api[ -]?key|secret key|token|ssn|social security|credit card|card number|iban)\b|sk-[A-Za-z0-9]{8,}|\b\d{8,}\b|[\w.+-]+@[\w-]+\.[\w.]+|https?:\/\//i;
 
+// Lasting facts are states ("Works as a nurse", "Lives in Leeds"), not what the writer is busy with right now. A progressive
+// opening ("Is cooking a ratatouille", "Is planning to ask for Friday off", "Is waiting for someone") passes the allow-list of
+// fact verbs, so it needs its own rule: only these ongoing activities are lasting ("Is training for a 10k run").
+const LASTING_ACTIVITY = new Set(('training studying learning working living raising recovering caring saving writing building practising practicing volunteering dating '
+  + 'expecting commuting managing coaching teaching renovating renting').split(' '));
+const PROGRESSIVE_RE = /^(?:(?:is|are|was|were)|has been|have been)\s+(?:currently\s+|now\s+|still\s+|just\s+|also\s+|really\s+)?(\p{L}+ing)\b/iu;
+const ACTIVITY_NOW_RE = /^(?:is|are) just\b|^has (?:never |not |often )?(?:felt|thought|wondered)\b|^(?:does|do) not (?:even )?(?:know|understand|remember)\b|\bnot sure\b|^(?:is|are) (?:about|going) to\b/i;
+const isTransientActivity = (s) => {
+  const m = PROGRESSIVE_RE.exec(s);
+  return (m !== null && !LASTING_ACTIVITY.has(m[1].toLowerCase())) || ACTIVITY_NOW_RE.test(s);
+};
+// "Was in their grandmother's kitchen" is a scene, "Was born in Leeds" is a fact.
+const WAS_LASTING_RE = /^(?:was|were)\s+(?:born|raised|adopted|married|divorced|widowed|diagnosed|brought up|previously|once|formerly|a |an |the )/i;
+// "Their apple cake" is a noun fragment: a fact about a person has a verb.
+const THEIR_VERB_RE = /\b(?:is|are|was|were|has|have|had|lives|lived|works|worked|studies|studied|loves|likes|enjoys|plays|runs|died|passed|moved|born|married|divorced|retired|owns|keeps|needs|wants|teaches|struggles|suffers|speaks|grew|trained|called|named)\b/i;
+// Past-tense verbs of a diary event. A lasting fact does not say who cancelled, told or visited.
+const EVENT_IN_FACT_RE = /\b(?:cancell?ed|surprised|interrupted|texted|invited|asked|told|said|gave|brought|bought|came|emailed|sent|left|woke|went|saw|presented|hid|skipped|decided|forgot|noticed|realized|realised|mentioned|complained|argued|apologi[sz]ed|replied|answered|arrived|returned|visited)\b/i;
+// Facts are written in the third person. A line in the writer's own voice in Spanish, French, German, Portuguese or
+// Italian ("Mi jefa me pidió...", "J'ai parlé à...") is a copied sentence or a diary event, not a fact about the writer.
+// A lone possessive ("Vive con mi pareja Alex") is only a model slip and is turned into the third person instead.
+const FIRST_PERSON_FOREIGN_RE = /(?<![\p{L}\p{N}])(?:me|conmigo|yo|estoy|tengo|soy|fui|tuve|dormí|sentí|hablé|hablamos|pasamos|fuimos|estamos|je|moi|nous|notre|nos|ich|mir|mich|wir|unser|eu|io|ho|sono|siamo)(?![\p{L}\p{N}])|(?<![\p{L}\p{N}])[jm]['’](?=\p{L})/iu;
+const FOREIGN_POSSESSIVES = new Map(Object.entries({
+  mi: 'su', mis: 'sus', mon: 'son', ma: 'sa', mes: 'ses', mein: 'sein', meine: 'seine', meinen: 'seinen', meinem: 'seinem', meiner: 'seiner',
+  meu: 'seu', minha: 'sua', meus: 'seus', minhas: 'suas', mio: 'suo', mia: 'sua', miei: 'suoi', mie: 'sue',
+}));
+const FOREIGN_POSSESSIVE_RE = /(?<![\p{L}\p{N}])(?:mi|mis|mon|ma|mes|mein|meine|meinen|meinem|meiner|meu|minha|meus|minhas|mio|mia|miei|mie)(?![\p{L}\p{N}])/giu;
+const foreignThirdPerson = (line) => line.replace(FOREIGN_POSSESSIVE_RE, (word) => {
+  const out = FOREIGN_POSSESSIVES.get(word.toLowerCase());
+  return word[0] === word[0].toUpperCase() && word[0] !== word[0].toLowerCase() ? capitalize(out) : out;
+});
+// Spanish and French diary events ("vino de visita", "a parlé à") and a third-person pronoun as subject ("Il a ri...": that is
+// about someone else). Lasting facts use present-tense states ("Tiene", "Vive", "Travaille").
+const FOREIGN_EVENT_RE = /(?<![\p{L}\p{N}])(?:vino|vinieron|fue|fueron|hizo|hicieron|dijo|dijeron|tuvo|puso|pidió|llamó|visitó|invitó|preguntó|regresó|llegó|salió|cenó|comió|habló|dormía|había|estaba|estaban|se sintió|se siente|se sentía|se reunió|se dio cuenta|était|étaient|avait|faisait|se sent|se sentait|se sentit)(?![\p{L}\p{N}])|(?<![\p{L}\p{N}])a (?:parlé|appelé|dit|vu|fait|ri|invité|passé|mangé|dormi|eu|été|pris|mis)(?![\p{L}\p{N}])|(?<![\p{L}\p{N}])est (?:venu|venue|allé|allée|rentré|rentrée|arrivé|arrivée)(?![\p{L}\p{N}])/iu;
+const FOREIGN_PRONOUN_START_RE = /^(?:il|elle|ils|elles|él|ella|ellos|ellas|er|sie|ele|ela|lui|lei)\s/iu;
+// A model that answers the memory task with a chat reply addresses the writer ("tu hermano", "あなた"): that is not a third-person fact.
+const FOREIGN_SECOND_PERSON_RE = /(?<![\p{L}\p{N}])(?:tú|tu|tus|te|ti|contigo|usted|ustedes|toi|ton|ta|tes|vous|votre|vos|dich|dir|dein|deine|deinen|deinem|deiner|você|vocês|teu|tua|teus|tuas|tuo|tuoi|tue)(?![\p{L}\p{N}])|あなた|君|你|您|당신/iu;
+// Japanese: past polite forms, plans, wishes and passing states (tired, busy, looking forward) are not lasting facts.
+const JA_TRANSIENT_RE = /ました|でした|予定|つもり|したい|行きたい|ところです|思います|でしょう|疲れ|忙し|楽しみ|嬉し|うれし|悲し|かなし|寂し|さみし|眠|不安|心配|緊張|ちょっと|少し/u;
+const HAS_KANA = /[\p{Script=Hiragana}\p{Script=Katakana}]/u;
+
 // Words that carry no information about which facts the user actually stated.
 const GENERIC_FACT_WORDS = new Set(('has have works work lives live loves love likes like enjoys enjoy their with from that this also into about called named year years '
   + 'being been very just really often always never than then them they were what when where which while who whom will would could should more most some such '
@@ -623,9 +701,16 @@ function specificsGrounded(fact, hay) {
  */
 function isGrounded(fact, userText) {
   const hay = userText.toLowerCase();
-  if (MEMORY_EXAMPLES.some(({ fact: example, rare }) => isNearDuplicate(example, fact) && !hay.includes(rare))) return false;
-  if (!specificsGrounded(fact, hay)) return false;
   const lower = fact.toLowerCase();
+  const copiedExample = MEMORY_EXAMPLES.find(({ fact: example }) => isNearDuplicate(example, fact));
+  if (copiedExample) {
+    // An echoed example needs the entry to hold its distinctive word AND every other distinctive word of the fact:
+    // "Has a younger sister called Maya" is refused for an entry about "my sister Maya" ("younger" is the prompt's).
+    if (!hay.includes(copiedExample.rare)) return false;
+    const unsupported = (lower.match(/[\p{L}\p{N}]{5,}/gu) || []).filter((w) => !GENERIC_FACT_WORDS.has(w) && !hay.includes(w.slice(0, 5)));
+    if (unsupported.length > 0) return false;
+  }
+  if (!specificsGrounded(fact, hay)) return false;
   // Chinese, Japanese and Korean have no spaces: compare character pairs instead of words.
   for (const run of lower.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]{2,}/gu) || []) {
     const chars = Array.from(run);
@@ -724,6 +809,7 @@ function acceptFact(raw, userName, englishEntry = false) {
   const length = Array.from(s).length;
   const cjk = HAS_CJK_CHAR.test(s);
   if (length > 200 || length < (cjk ? 3 : 6) || (words.length < 2 && !cjk)) return null;
+  if (splitSentences(s).length > 1) return null; // a fact is one short statement; two sentences are a paragraph of chat
   if (BAD_STARTS.has(first)) return null;
   // "Sam has two cats": a named subject. The user's own name was removed earlier; any other name means another person.
   if (words.length > 1 && FACT_VERBS.has(words[1].toLowerCase()) && !FACT_VERBS.has(first) && !PAST_OK.has(first)) return null;
@@ -733,12 +819,48 @@ function acceptFact(raw, userName, englishEntry = false) {
   if (looksEnglish && !FACT_VERBS.has(first) && !PAST_OK.has(first) && first !== 'would') return null;
   if (EMOTION_STATE_RE.test(s) || FEELING_STATE_RE.test(s)) return null;
   if (/\byou(?:r)?\b|\bshould\b|\bmust\b/i.test(s)) return null;
-  if (!looksEnglish) return capitalize(s);
+  if (/<\s*(?:short fact|fact|facts)\s*>/i.test(s)) return null; // the format placeholder of the prompt, echoed
+  if (looksEnglish) {
+    if (isTransientActivity(s) || EVENT_IN_FACT_RE.test(s)) return null;
+    if (/^(?:was|were)\b/i.test(s) && !WAS_LASTING_RE.test(s)) return null;
+    if (/^their\b/i.test(s) && !THEIR_VERB_RE.test(s)) return null;
+  }
+  if (!looksEnglish) {
+    if (FOREIGN_SECOND_PERSON_RE.test(s)) return null;
+    if (HAS_KANA.test(s) ? JA_TRANSIENT_RE.test(s) : (FIRST_PERSON_FOREIGN_RE.test(s) || FOREIGN_EVENT_RE.test(s) || FOREIGN_PRONOUN_START_RE.test(s))) return null;
+    return capitalize(foreignThirdPerson(s));
+  }
   // The fact is read as "Things you know about Sam: - ...": a leftover "my" would be read as the model's own. "my" / "our" become
   // "their"; a line that still talks about "I" or "me" mixes two speakers ("Has a brother, Tom, and I talk to him weekly").
   const neutral = s.replace(/\b(?:my|our)\b/gi, 'their');
   if (FIRST_PERSON_LEFTOVER_RE.test(neutral)) return null;
   return capitalize(neutral);
+}
+
+const norm = (t) => String(t).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * Is the fact (almost) one sentence of the entry, copied? A model that was not given a good format writes the entry's own
+ * sentences as bullets ("Mi jefa me pidió terminar el informe antes del viernes"): that is a diary line, not a fact.
+ * Short sentences are exempt ("I have a sister called Maya" is itself a fact).
+ */
+function copiesEntry(fact, entry) {
+  const f = norm(fact);
+  const e = norm(entry);
+  const factWords = f.split(' ').filter(Boolean);
+  if (/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(f)) return Array.from(f.replace(/ /g, '')).length >= 8 && e.replace(/ /g, '').includes(f.replace(/ /g, ''));
+  if (factWords.length < 5) return false;
+  if (e.includes(f) && factWords.length >= 6) return true;
+  const factSet = new Set(factWords);
+  for (const sentence of splitSentences(entry)) {
+    const words = norm(sentence).split(' ').filter(Boolean);
+    if (words.length < 8) continue;
+    const set = new Set(words);
+    let shared = 0;
+    for (const w of factSet) if (set.has(w)) shared += 1;
+    if (shared / factSet.size >= 0.8 && shared / set.size >= 0.6) return true;
+  }
+  return false;
 }
 
 /**
@@ -751,7 +873,10 @@ function acceptFact(raw, userName, englishEntry = false) {
  * its names and numbers must occur there, and the prompt's own example facts (MEMORY_EXAMPLES) are accepted only when
  * the entry has their distinctive word; anything else is treated as invented or copied and dropped. When the entry is
  * in English, a line must open with a fact verb ("Has", "Works", ...): "Dan annoys them" and "Exam stress" are not facts
- * about the writer. "my" / "our" inside a fact become "their"; a line that still says "I" or "me" is dropped.
+ * about the writer, and neither are what the writer is doing right now ("Is cooking...", "Is planning...") or diary events
+ * ("Their friend cancelled..."). "my" / "our" inside a fact become "their"; a line that still says "I" or "me" is dropped.
+ * Lines in other languages are dropped when they are in the writer's own voice, an event, addressed to the writer, a
+ * sentence copied from the entry, or more than one sentence; a lone "mi"/"mon"/"mein" becomes "su"/"son"/"sein".
  * @param {unknown} text model output
  * @param {{existing?: (string|{text: string})[], userText?: string, userName?: string}} [opts] `existing`: memories that are
  *   already stored; `userName`: the user's name, so "Sam has two cats" becomes "Has two cats"
@@ -768,13 +893,13 @@ export function parseMemoryLines(text, { existing = [], userText = '', userName 
   const firstMeaningful = cleanValue(lines[0]).replace(FACT_PREFIX_RE, '');
   if (NONE_LINE_RE.test(firstMeaningful)) return [];
   const entry = typeof userText === 'string' ? userText : '';
-  const englishEntry = looksEnglishText(entry);
+  const englishEntry = looksEnglishText(entry) || (detectLanguage(entry) || {}).code === 'en';
   const out = [];
   for (const line of lines) {
     if (NONE_LINE_RE.test(cleanValue(line))) continue;
     const fact = acceptFact(line, typeof userName === 'string' ? userName.trim() : '', englishEntry);
     if (!fact) continue;
-    if (entry.trim() !== '' && !isGrounded(fact, entry)) continue;
+    if (entry.trim() !== '' && (!isGrounded(fact, entry) || copiesEntry(fact, entry))) continue;
     if (known.some((k) => isNearDuplicate(k, fact)) || out.some((o) => isNearDuplicate(o, fact))) continue;
     out.push(fact);
     if (out.length >= 3) break;
