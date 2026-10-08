@@ -1,4 +1,4 @@
-// The free Gemini API as the live service really behaves (docs/ARCHITECTURE.md "Live-verified corrections"), driven
+// The free Gemini API as the live service really behaves (docs/ARCHITECTURE.md section 9, Gemini adapter), driven
 // through the UI against the Gemini mock in its `live` profile: request shape, thinking settings, a guided journal that
 // starts with a model turn, a retired model, an overloaded model with recovery through Settings, a revoked key, quotas.
 
