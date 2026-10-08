@@ -1,0 +1,405 @@
+// Shared HTTP plumbing for the adapters: abort + timeout handling, network-error classification,
+// bounded body readers and retry timing. See docs/ARCHITECTURE.md §9 "Shared HTTP behaviour".
+//
+// Node's global fetch ignores HTTPS_PROXY unless the process runs with NODE_USE_ENV_PROXY=1; we do not
+// re-implement proxying. Note also that undici itself gives up on a response whose headers take longer
+// than 300 s (UND_ERR_HEADERS_TIMEOUT), so a first-byte timeout above that cannot be honoured.
+
+import { ProviderError, abortError, errorFactory, isAbortError } from './errors.js';
+
+export const DEFAULT_IDLE_MS = 60_000;
+export const MAX_ERROR_BODY_BYTES = 64 * 1024;
+export const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024;
+/** A transient 429/503 is retried once, but only when the server asks for a short wait. */
+export const MAX_AUTO_RETRY_WAIT_MS = 8_000;
+export const DEFAULT_RETRY_WAIT_MS = 1_000;
+
+/** Names used inside user-facing sentences. */
+export const DISPLAY_NAMES = Object.freeze({
+  gemini: 'Gemini',
+  openai: 'The OpenAI-compatible API',
+  local: 'Your local model server',
+});
+
+/** The URL as it may safely appear in a message: no credentials, no query string, no fragment. */
+export function describeUrl(url) {
+  try {
+    const u = new URL(url);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return '(invalid address)';
+  }
+}
+
+/** Collapse whitespace and cap the length, so upstream text fits on one line of a message. */
+export function oneLine(text, max = 300) {
+  const flat = String(text ?? '').replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/**
+ * Seconds ("3", "1.5") or an HTTP date -> milliseconds. Anything else -> undefined.
+ * @param {string|number|null|undefined} value
+ * @param {number} [now]
+ */
+export function parseRetryAfter(value, now = Date.now()) {
+  if (value === null || value === undefined) return undefined;
+  const s = String(value).trim();
+  if (!s) return undefined;
+  let ms;
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    ms = Number(s) * 1000;
+  } else {
+    const at = Date.parse(s);
+    if (!Number.isFinite(at)) return undefined;
+    ms = at - now;
+  }
+  return Math.min(Math.max(Math.round(ms), 0), 24 * 3600 * 1000);
+}
+
+/** Reads `retry-after-ms` (non-standard but common) before `retry-after`. */
+export function retryAfterFromHeaders(headers) {
+  if (!headers || typeof headers.get !== 'function') return undefined;
+  const ms = headers.get('retry-after-ms');
+  if (ms && /^\d+(\.\d+)?$/.test(ms.trim())) return Math.min(Math.round(Number(ms)), 24 * 3600 * 1000);
+  return parseRetryAfter(headers.get('retry-after'));
+}
+
+/**
+ * How long to wait before the single automatic retry, or null when the error is not worth retrying
+ * (anything but a short 429 rate limit or a 503).
+ * @param {ProviderError} err
+ * @param {number} [fallbackMs] used when the server did not say how long to wait
+ */
+export function autoRetryDelay(err, fallbackMs = DEFAULT_RETRY_WAIT_MS) {
+  const transient = (err.code === 'rate_limit' && err.status === 429) || err.status === 503;
+  if (!transient) return null;
+  const wait = err.retryAfterMs ?? fallbackMs;
+  return wait <= MAX_AUTO_RETRY_WAIT_MS ? wait : null;
+}
+
+/** Abortable sleep. Its timer is cleared on every exit path. */
+export function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(abortError());
+      return;
+    }
+    let timer = null;
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    timer = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, Math.max(0, ms));
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function errCode(err) {
+  const seen = new Set();
+  let cur = err;
+  for (let i = 0; cur && typeof cur === 'object' && i < 4 && !seen.has(cur); i += 1) {
+    seen.add(cur);
+    if (typeof cur.code === 'string') return cur.code;
+    cur = cur.cause;
+  }
+  return '';
+}
+
+function errText(err) {
+  const parts = [];
+  let cur = err;
+  for (let i = 0; cur && typeof cur === 'object' && i < 4; i += 1) {
+    if (typeof cur.message === 'string') parts.push(cur.message);
+    cur = cur.cause;
+  }
+  return parts.join(' ').toLowerCase();
+}
+
+const CERT_CODE = /^(CERT_|UNABLE_TO_|DEPTH_ZERO_|SELF_SIGNED|ERR_TLS_|ERR_SSL_|HOSTNAME_MISMATCH)/;
+
+/**
+ * Turn whatever fetch() or a body reader threw into a ProviderError. The hint always names the URL that
+ * was tried, and for the local provider reminds the user to start their server.
+ * @param {unknown} err
+ * @param {{provider: string, secrets?: string[], url: string}} ctx
+ */
+export function networkError(err, ctx) {
+  const fail = errorFactory(ctx.provider, ctx.secrets || []);
+  const code = errCode(err);
+  const text = errText(err);
+  const tried = describeUrl(ctx.url);
+  const who = DISPLAY_NAMES[ctx.provider] || 'The server';
+  const local = ctx.provider === 'local';
+  const base = { cause: err };
+
+  if (code === 'ERR_INVALID_URL' || /invalid url|unknown scheme|bad port|includes credentials|invalid (?:host|port)/.test(text)) {
+    return fail('bad_base_url', 'The server address is not valid.', {
+      ...base,
+      hint: 'Use a full address such as http://localhost:11434/v1 (without a password or query string) in Settings.',
+    });
+  }
+  if (code === 'UND_ERR_HEADERS_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT') {
+    return fail('timeout', `${who} took too long to answer.`, {
+      ...base,
+      hint: local
+        ? 'The first request after starting a model loads it into memory and can be slow. Try again.'
+        : 'Try again in a moment.',
+    });
+  }
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return fail('network', 'Could not find the server.', {
+      ...base,
+      hint: `Tried ${tried}. Check the address for typos and that you are online.`,
+    });
+  }
+  if (CERT_CODE.test(code)) {
+    return fail('network', 'The server\'s security certificate was not accepted.', {
+      ...base,
+      hint: `Tried ${tried}. For a self-hosted server with a self-signed certificate, use plain http:// on a trusted network or add your CA via NODE_EXTRA_CA_CERTS.`,
+    });
+  }
+  if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'UND_ERR_SOCKET' || /terminated|other side closed|socket hang up/.test(text)) {
+    return fail('network', 'The connection to the server was closed unexpectedly.', {
+      ...base,
+      hint: local
+        ? `Tried ${tried}. The server may have crashed or run out of memory loading the model; check its terminal and try again.`
+        : `Tried ${tried}. Try again; if it keeps happening, check the service status.`,
+    });
+  }
+  const advice = local
+    ? 'Is Ollama running? Start it with `ollama serve` (or start llama-server / the LM Studio local server), then check the address in Settings.'
+    : 'Check the base URL in Settings and your internet connection.';
+  return fail('network', `Could not connect to ${local ? 'the local model server' : 'the server'}.`, {
+    ...base,
+    hint: `Tried ${tried}. ${advice}`,
+  });
+}
+
+function timeoutError(kind, ctx, ms) {
+  const fail = errorFactory(ctx.provider, ctx.secrets || []);
+  const who = DISPLAY_NAMES[ctx.provider] || 'The server';
+  const secs = Math.max(1, Math.round(ms / 1000));
+  const local = ctx.provider === 'local';
+  if (kind === 'idle') {
+    return fail('timeout', `${who} stopped responding in the middle of the reply (no data for ${secs} seconds).`, {
+      hint: local
+        ? 'The machine may be overloaded. Try again, or use a smaller model.'
+        : 'Try again. If it keeps happening, check the service status.',
+    });
+  }
+  return fail('timeout', `${who} did not answer within ${secs} seconds.`, {
+    hint: local
+      ? 'The first request after starting a model loads it into memory and can be slow. Try again, or raise the timeout in Settings.'
+      : 'Try again in a moment, or raise the timeout in Settings.',
+  });
+}
+
+/**
+ * A request scope owns the AbortController for one provider call, chained to the caller's signal, plus the
+ * first-byte and idle timers. Always call `close()` (the adapters do it in a `finally`): it clears the timer
+ * and removes the listener from the caller's signal.
+ *
+ * @param {object} opts
+ * @param {AbortSignal} [opts.signal] the caller's signal
+ * @param {number} opts.firstByteMs time allowed until the first body bytes arrive
+ * @param {number} [opts.idleMs] allowed silence between chunks afterwards
+ * @param {{provider: string, secrets?: string[], url: string}} opts.ctx used to build errors
+ * @throws {DOMException} AbortError when the signal is already aborted
+ */
+export function createScope({ signal, firstByteMs, idleMs = DEFAULT_IDLE_MS, ctx }) {
+  if (signal && signal.aborted) throw abortError();
+  const controller = new AbortController();
+  let timer = null;
+  let expired = null;
+  let expiredMs = 0;
+  let closed = false;
+  let currentIdleMs = idleMs;
+
+  const stop = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+  };
+  const arm = (ms, kind) => {
+    stop();
+    if (closed || expired || !Number.isFinite(ms) || ms <= 0) return;
+    timer = setTimeout(() => {
+      timer = null;
+      expired = kind;
+      expiredMs = ms;
+      controller.abort(new Error(`${kind} timeout`));
+    }, Math.min(ms, 2 ** 31 - 1));
+    // Never keep the process alive just for a timeout; the in-flight socket does that.
+    if (typeof timer.unref === 'function') timer.unref();
+  };
+  const onCallerAbort = () => {
+    stop();
+    controller.abort(signal.reason);
+  };
+  if (signal) signal.addEventListener('abort', onCallerAbort, { once: true });
+  arm(firstByteMs, 'first-byte');
+
+  return {
+    /** Pass this to fetch(). */
+    signal: controller.signal,
+    ctx,
+    get callerAborted() { return Boolean(signal && signal.aborted); },
+    get expired() { return expired; },
+    /** Start a fresh first-byte window (a new attempt after a retry). */
+    restart() { arm(firstByteMs, 'first-byte'); },
+    /** Stop the clock while we are waiting on ourselves (retry sleep, a slow consumer). */
+    pause: stop,
+    /** Arm the idle timer: call after each chunk has been handed over. */
+    touch() { arm(currentIdleMs, 'idle'); },
+    /** Change the idle allowance (used for the short grace period after the final chunk). */
+    setIdle(ms) { currentIdleMs = ms; },
+    /** Throw the AbortError if the caller has aborted. */
+    throwIfAborted() { if (signal && signal.aborted) throw abortError(); },
+    /** Map anything thrown by fetch or a body reader to the right error. */
+    fail(err) {
+      if (signal && signal.aborted) return abortError();
+      if (err instanceof ProviderError) return err;
+      if (expired) return timeoutError(expired, ctx, expiredMs);
+      if (isAbortError(err)) return abortError();
+      return networkError(err, ctx);
+    },
+    /** @param {boolean} [abortUpstream] also cancel the in-flight request */
+    close(abortUpstream = false) {
+      if (closed) return;
+      closed = true;
+      stop();
+      if (signal) signal.removeEventListener('abort', onCallerAbort);
+      if (abortUpstream && !controller.signal.aborted) controller.abort();
+    },
+  };
+}
+
+/**
+ * fetch() with the scope's signal. Redirects are not followed: following a POST redirect silently turns
+ * it into a GET, and credentials should never be replayed to a host the user did not configure.
+ * @returns {Promise<Response>}
+ */
+export async function scopedFetch(fetchFn, url, init, scope) {
+  try {
+    return await fetchFn(url, { ...init, signal: scope.signal, redirect: 'manual' });
+  } catch (err) {
+    throw scope.fail(err);
+  }
+}
+
+/**
+ * Iterate over a response body as byte chunks. While the consumer is busy with a chunk the idle clock is
+ * paused (our slowness is not the server's), and the body is cancelled if the consumer stops early.
+ * @param {Response} response
+ * @param {ReturnType<typeof createScope>} scope
+ * @returns {AsyncGenerator<Uint8Array>}
+ */
+export async function* readChunks(response, scope) {
+  if (!response.body) return;
+  const reader = response.body.getReader();
+  let finished = false;
+  try {
+    for (;;) {
+      scope.throwIfAborted();
+      let step;
+      try {
+        step = await reader.read();
+      } catch (err) {
+        throw scope.fail(err);
+      }
+      if (step.done) {
+        finished = true;
+        return;
+      }
+      scope.pause();
+      yield step.value;
+      scope.touch();
+    }
+  } finally {
+    if (!finished) reader.cancel().catch(() => {});
+  }
+}
+
+/**
+ * Read a whole body as text, bounded.
+ * @param {Response} response
+ * @param {ReturnType<typeof createScope>} scope
+ * @param {number} [maxBytes]
+ * @param {{truncate?: boolean}} [opts] cut the text at maxBytes instead of failing
+ */
+export async function readText(response, scope, maxBytes = MAX_JSON_BODY_BYTES, { truncate = false } = {}) {
+  const decoder = new TextDecoder();
+  let text = '';
+  let bytes = 0;
+  for await (const chunk of readChunks(response, scope)) {
+    bytes += chunk.byteLength;
+    if (bytes > maxBytes) {
+      if (!truncate) {
+        throw errorFactory(scope.ctx.provider, scope.ctx.secrets || [])('server', 'The server\'s answer was far too large to be valid.', {
+          hint: 'Check that the base URL points at the model API and not at a web page.',
+        });
+      }
+      text += decoder.decode(chunk.subarray(0, Math.max(0, chunk.byteLength - (bytes - maxBytes))), { stream: true });
+      break;
+    }
+    text += decoder.decode(chunk, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+/**
+ * Best-effort read of an error response body: a failure to read it (other than the caller aborting) just
+ * yields '' so the status code alone still produces a useful error.
+ */
+export async function readErrorBody(response, scope) {
+  try {
+    return await readText(response, scope, MAX_ERROR_BODY_BYTES, { truncate: true });
+  } catch (err) {
+    if (isAbortError(err)) throw err;
+    return '';
+  }
+}
+
+/**
+ * Best-effort parse of an error body in any of the shapes seen in the wild.
+ * @param {string} text
+ * @returns {{json: any, message: string, code: string, type: string, status: string, html: boolean}}
+ */
+export function parseErrorBody(text) {
+  const raw = String(text ?? '').trim();
+  const out = { json: null, message: '', code: '', type: '', status: '', html: false };
+  if (!raw) return out;
+  if (/^<(!doctype|html|head|body)/i.test(raw)) {
+    out.html = true;
+    return out;
+  }
+  let json = null;
+  try { json = JSON.parse(raw); } catch { /* plain text */ }
+  if (json === null || typeof json !== 'object') {
+    out.message = oneLine(raw);
+    return out;
+  }
+  out.json = json;
+  const err = json.error;
+  if (typeof err === 'string') {
+    out.message = err;
+  } else if (err && typeof err === 'object') {
+    out.message = typeof err.message === 'string' ? err.message : typeof err.msg === 'string' ? err.msg : '';
+    out.code = err.code === undefined || err.code === null ? '' : String(err.code);
+    out.type = typeof err.type === 'string' ? err.type : '';
+    out.status = typeof err.status === 'string' ? err.status : '';
+  } else if (typeof json.message === 'string') {
+    out.message = json.message;
+  } else if (typeof json.detail === 'string') {
+    out.message = json.detail;
+  } else if (Array.isArray(json.detail) && json.detail[0] && typeof json.detail[0].msg === 'string') {
+    out.message = json.detail[0].msg;
+  } else if (typeof json.error_description === 'string') {
+    out.message = json.error_description;
+  }
+  out.message = oneLine(out.message);
+  return out;
+}
