@@ -1,5 +1,39 @@
 # MyJournal — architecture & contracts
 
+> ## ⚠ Live-verified corrections (2026-10-08) — these SUPERSEDE anything contradictory further down
+>
+> Verified by calling Google's real Gemini API with a real free-tier key. Raw samples of every response mentioned here are in `test/fixtures/gemini-live/` (see its README) — use them as test fixtures:
+>
+> 1. **Default Gemini model is `gemini-flash-lite-latest`** (currently → `gemini-3.5-flash-lite`: ~1 s first byte, does not think by default,
+>    best free quota). `gemini-flash-latest` (currently → `gemini-3.8-flash`) is the "smarter but slower" choice: it showed 16–23 s first-byte,
+>    `503 UNAVAILABLE "high demand"`, and timeouts under load. Suggested models in the catalog: `gemini-flash-lite-latest` ("Fast — recommended"),
+>    `gemini-flash-latest` ("Smarter, can be slow/busy"), `gemini-3.5-flash-lite`, `gemini-3.5-flash`.
+> 2. **`cfg.thinking` values are `"auto"` (default) and `"low"`** (not fast/default).
+>    * `"auto"`: send **no** `thinkingConfig`. Because thought tokens count against `maxOutputTokens` (observed: 189 of 200 tokens spent thinking → truncated
+>      reply with `finishReason: MAX_TOKENS`), always send `maxOutputTokens = requestedMaxTokens + 2048` (cap 8192). Reply length is controlled by the prompt, not the cap.
+>    * `"low"`: send `generationConfig.thinkingConfig = { thinkingLevel: "low" }` (accepted by 3.x models). If the API answers 400 mentioning `thinking`
+>      → retry once without it and remember per model for the adapter's lifetime.
+>    * **Never send `thinkingBudget: 0` or `thinkingLevel: "minimal"`**: `minimal` is rejected by `gemini-3.8-flash`
+>      (`400 "Thinking level MINIMAL is not supported for this model"`), `thinkingBudget: 0` is rejected by 3.x lite (`400 "Request contains an invalid argument."`).
+> 3. **Turn rules (verified)**: a conversation may START with a `model` turn (guided-journal opening) — send as is, no synthetic user turn;
+>    consecutive same-role turns are accepted but still merge them; a request **ending with a model turn → `400 "Requests ending with a model turn are not supported."`**;
+>    an empty text part → `400 "Request has empty input."` — the adapter drops empty messages before sending and, if nothing is left, throws `bad_request` without calling the API.
+> 4. **`models.list` reality**: field is `supportedGenerationMethods` (confirmed), 62 entries on one page, entries also carry `thinking: true`, `inputTokenLimit`, `outputTokenLimit`.
+>    The list contains many non-chat ids (`lyria-*`, `antigravity-*`, `deep-research-*`, `nano-banana*`, `gemini-nano-banana-*`, `*-tts`, `*-image*`,
+>    `gemini-3.5-transcribe`, `gemini-omni-*`, `gemini-robotics-*`, `gemini-*-computer-use-*`, `*-customtools`, embeddings/imagen/veo) **and retired models that 404**
+>    (`gemini-2.5-flash` → `404 NOT_FOUND "This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash…"`).
+>    So: **allow-list** ids matching `^(gemini|gemma)-` (plus the `-latest` aliases), then drop ids matching
+>    `/embed|aqa|imagen|veo|tts|image|banana|live|audio|transcribe|omni|robotics|computer-use|customtools|learnlm|lyria/`; require `generateContent` in `supportedGenerationMethods`;
+>    sort `*-latest` aliases first, then newest first (descending natural order). Model errors of the "no longer available" kind map to `model_not_found` and the hint
+>    **quotes Google's own suggestion** ("Google suggests gemini-3.8-flash — pick a model from *Load models*"). Gemma models (`gemma-4-*`) work, with systemInstruction.
+> 5. **Error codes seen live**: bad key `400 INVALID_ARGUMENT / API_KEY_INVALID`; no key `403 PERMISSION_DENIED`; unknown model `404 NOT_FOUND`; retired model `404 NOT_FOUND`;
+>    overload `503 UNAVAILABLE "This model is currently experiencing high demand…"` (arrives after 15+ s) → `overloaded` with the hint "switch to gemini-flash-lite-latest in Settings".
+> 6. SSE frames are `data: {json}\r\n\r\n`; short answers arrive in 2–3 frames; the final frame carries `finishReason` and `usageMetadata` (`thoughtsTokenCount` only when thinking happened).
+>    Streaming a *journal-length* reply therefore arrives in few big chunks — the UI must still look good (do not rely on fine-grained deltas).
+
+---------------------------------------------------------------------------------------------------
+
+
 A private, AI-guided journal (think: Rosebud-style guided journaling with an AI that asks follow-up
 questions, remembers you, and surfaces patterns). **Bring your own model**:
 
@@ -163,7 +197,7 @@ Stored as one JSON document (`settings` table, key `app`). Defaults live in `src
     "contextBudgetTokens": 3000,                                // 500..32000 approx. prompt budget (history + memory)
     "timeoutSec": 120,                                          // first-byte timeout; local cold-starts can be slow
     "providers": {
-      "gemini": { "baseUrl": "https://generativelanguage.googleapis.com", "model": "gemini-flash-latest", "thinking": "fast", "apiKey": "" },
+      "gemini": { "baseUrl": "https://generativelanguage.googleapis.com", "model": "gemini-flash-lite-latest", "thinking": "auto", "apiKey": "" },   // thinking: "auto" | "low"
       "openai": { "baseUrl": "https://api.openai.com/v1", "model": "gpt-4o-mini", "apiKey": "" },
       "local":  { "baseUrl": "http://localhost:11434/v1", "model": "llama3.2:3b", "apiKey": "" }
     }
@@ -287,7 +321,7 @@ A comment frame `: ping\n\n` is sent every 15 s. Headers: `Content-Type: text/ev
 
 | event | data | when |
 |---|---|---|
-| `notice` | `{ kind: "safety", text, message }` | crisis keywords detected in the last user message — sent first; `message` is the persisted static assistant message (`meta.kind:"safety"`) |
+| `notice` | `{ kind: "safety", text, message }` or `{ kind: "warn", text }` | `safety`: crisis keywords detected in the last user message — sent first; `message` is the persisted static assistant message (`meta.kind:"safety"`). `warn`: a best-effort step failed (e.g. "Saved without an automatic title: rate limit reached"); the client shows it as a toast. |
 | `phase` | `{ name: "reflection" \| "metadata" \| "memory" }` | wrap-up progress |
 | `delta` | `{ text }` | streamed assistant text |
 | `entry` | `{ entry }` | entry metadata changed (title, summary, emotions, status…) |
@@ -424,13 +458,12 @@ transient `429` with `retryAfterMs ≤ 8000` and for `503`; never retry after an
 * `POST {base}/v1beta/models/{model}:streamGenerateContent?alt=sse`, header `x-goog-api-key` (never `?key=`).
   Model ids: strip a leading `models/`, `encodeURIComponent` the rest.
 * Body: `{ systemInstruction: { parts: [{text}] }, contents: [{ role: 'user'|'model', parts: [{text}] }], generationConfig: { temperature, maxOutputTokens, thinkingConfig? } }`.
-  Contents must **start with a user turn and alternate**: merge consecutive same-role turns; if the first turn is a
-  model turn (guided-journal opening prompt) prepend a user turn `"(I open my journal.)"`. System messages are joined into `systemInstruction`.
-* **Thinking** (`cfg.thinking`): `"fast"` (default) → ask for minimal thinking where known: model matches
-  `/gemini-2\.5-(flash|flash-lite)/` → `{ thinkingBudget: 0 }`; matches `/gemini-3/` or `-latest` aliases → `{ thinkingLevel: 'minimal' }`
-  (`'low'` if the id contains `pro`). `"default"` → omit `thinkingConfig` and raise `maxOutputTokens` to ≥ 2048 so
-  thoughts cannot starve the answer. If Gemini answers `400` mentioning `thinking`, retry once without `thinkingConfig`
-  and remember that for the model. Parts with `thought: true` are never emitted.
+  Drop empty-content messages; merge consecutive same-role turns; a leading `model` turn is sent as is (verified accepted). System messages are joined into `systemInstruction`.
+  If the last remaining turn is a `model` turn → throw `bad_request` ("nothing to reply to") without calling the API.
+* **Thinking** (`cfg.thinking`, see the live-verified corrections at the top of this file): `"auto"` (default) sends no `thinkingConfig` and uses
+  `maxOutputTokens = maxTokens + 2048` (≤ 8192) so thoughts cannot starve the answer; `"low"` sends `thinkingConfig: { thinkingLevel: "low" }` with a one-time
+  fallback (drop it and remember per model) if the API answers 400 mentioning `thinking`. Never send `thinkingBudget: 0` or `thinkingLevel: "minimal"`.
+  Parts with `thought: true` are never emitted.
 * Parse SSE `data:` JSON chunks: text from `candidates[0].content.parts[].text`; `finishReason`; `usageMetadata`.
   `promptFeedback.blockReason` or `finishReason ∈ {SAFETY, PROHIBITED_CONTENT, BLOCKLIST, SPII, IMAGE_SAFETY}` with no text → `blocked`
   ("Gemini declined to answer this one — journaling about hard things can trip safety filters; rephrase or switch provider").
@@ -440,17 +473,16 @@ transient `429` with `retryAfterMs ≤ 8000` and for `503`; never retry after an
   `RESOURCE_EXHAUSTED`/429 → `rate_limit` (parse `retryDelay`; message containing `per day`/`quota exceeded` for daily → `quota`);
   `NOT_FOUND` → `model_not_found` (hint: open Settings → *Load models*); `FAILED_PRECONDITION` with "location" → `region`;
   `UNAVAILABLE`/503 → `overloaded`; other 400 → `bad_request` with Google's message.
-* `listModels`: `GET {base}/v1beta/models?pageSize=1000` (follow `nextPageToken`, ≤5 pages); keep entries whose
-  `supportedGenerationMethods` includes `generateContent` (or all, if the field is absent); drop ids matching
-  `/embedding|aqa|imagen|veo|tts|image|live|audio|robotics|computer-use|learnlm/`; strip `models/`; label = `displayName || id`;
-  sort: `*-latest` aliases first, then ids descending.
+* `listModels`: `GET {base}/v1beta/models?pageSize=1000` (follow `nextPageToken`, ≤5 pages); apply the **allow-list + exclusion** rule from the live-verified
+  corrections (item 4) and require `generateContent` in `supportedGenerationMethods` (keep the entry if the field is absent); strip `models/`; label = `displayName || id`;
+  sort: `*-latest` aliases first, then ids descending. The list may include retired models that 404 — that is handled at request time (`model_not_found`).
 * `test`: tiny request via `generateContent`-compatible stream; same success rule as OpenAI.
 * Free-tier privacy note shown in UI: *prompts and responses on the free tier may be used by Google to improve its products
   (and reviewed by humans); billing-enabled projects are not.* Don't journal secrets with the free tier.
 
 ### Catalog copy (`describeProviders`)
 * gemini — "Free Gemini API": tagline "Free key from Google AI Studio", `keyUrl: https://aistudio.google.com/apikey`, suggested models
-  `gemini-flash-latest` ("Fast, recommended"), `gemini-flash-lite-latest` ("Fastest, highest free limits"); privacyNote above.
+  `gemini-flash-lite-latest` ("Fast — recommended"), `gemini-flash-latest` ("Smarter, can be slow or busy"), `gemini-3.5-flash-lite`, `gemini-3.5-flash`; privacyNote above.
 * openai — "OpenAI-compatible API": tagline "OpenAI, OpenRouter, Groq, Together, DeepSeek, …"; suggested `gpt-4o-mini`; presets for base URLs
   (OpenAI, OpenRouter `https://openrouter.ai/api/v1`, Groq `https://api.groq.com/openai/v1`, Together `https://api.together.xyz/v1`).
 * local — "Self-hosted small LLM": tagline "Runs on your machine — nothing leaves it"; presets Ollama `http://localhost:11434/v1`, llama.cpp `http://localhost:8080/v1`,

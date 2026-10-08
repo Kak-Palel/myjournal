@@ -1,0 +1,15 @@
+HTTP/1.1 200 Connection Established
+
+HTTP/2 400 
+vary: X-Origin
+vary: Referer
+vary: Origin,Accept-Encoding
+content-type: application/json; charset=UTF-8
+date: Thu, 08 Oct 2026 09:25:27 GMT
+server: scaffolding on HTTPServer2
+x-xss-protection: 0
+x-frame-options: SAMEORIGIN
+x-content-type-options: nosniff
+server-timing: gfet4t7; dur=127
+accept-ranges: none
+

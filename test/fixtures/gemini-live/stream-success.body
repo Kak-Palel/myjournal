@@ -1,0 +1,6 @@
+data: {"candidates": [{"content": {"parts": [{"text": "Hello,"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 20,"candidatesTokenCount": 2,"totalTokenCount": 22,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 20}],"serviceTier": "standard"},"modelVersion": "gemini-3.5-flash-lite","responseId": "g2HHaurEDKq6sOIPlPbROQ"}
+
+data: {"candidates": [{"content": {"parts": [{"text": " my favorite color is blue!"}],"role": "model"},"index": 0}],"usageMetadata": {"promptTokenCount": 20,"candidatesTokenCount": 8,"totalTokenCount": 28,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 20}],"serviceTier": "standard"},"modelVersion": "gemini-3.5-flash-lite","responseId": "g2HHaurEDKq6sOIPlPbROQ"}
+
+data: {"candidates": [{"content": {"parts": [{"text": "","thoughtSignature": "EmAKXgFpFH0TCk45bHJsLt4GdLW9xu/9KU1HlEisaujuNl4E425MoUFBbfTgIVBoU7K2CyCdDKRlFaU0QVodBFRaTqmfVOqIlgsOe0cBAe1nCiE2Sk59LQlKznbMn5V2skw="}],"role": "model"},"finishReason": "STOP","index": 0}],"usageMetadata": {"promptTokenCount": 20,"candidatesTokenCount": 8,"totalTokenCount": 28,"promptTokensDetails": [{"modality": "TEXT","tokenCount": 20}],"serviceTier": "standard"},"modelVersion": "gemini-3.5-flash-lite","responseId": "g2HHaurEDKq6sOIPlPbROQ"}
+

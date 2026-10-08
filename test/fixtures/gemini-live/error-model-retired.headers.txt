@@ -1,0 +1,15 @@
+HTTP/1.1 200 Connection Established
+
+HTTP/2 404 
+vary: Origin
+vary: X-Origin
+vary: Referer
+content-type: text/event-stream
+date: Thu, 08 Oct 2026 09:25:25 GMT
+server: scaffolding on HTTPServer2
+content-length: 349
+x-xss-protection: 0
+x-frame-options: SAMEORIGIN
+x-content-type-options: nosniff
+server-timing: gfet4t7; dur=163
+
