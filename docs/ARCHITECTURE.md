@@ -1,128 +1,116 @@
-# MyJournal — architecture & contracts
+# MyJournal: architecture and contracts
 
-> ## ⚠ Live-verified corrections (2026-10-08) — these SUPERSEDE anything contradictory further down
->
-> Verified by calling Google's real Gemini API with a real free-tier key. Raw samples of every response mentioned here are in `test/fixtures/gemini-live/` (see its README) — use them as test fixtures:
->
-> 1. **Default Gemini model is `gemini-flash-lite-latest`** (currently → `gemini-3.5-flash-lite`: ~1 s first byte, does not think by default,
->    best free quota). `gemini-flash-latest` (currently → `gemini-3.8-flash`) is the "smarter but slower" choice: it showed 16–23 s first-byte,
->    `503 UNAVAILABLE "high demand"`, and timeouts under load. Suggested models in the catalog: `gemini-flash-lite-latest` ("Fast — recommended"),
->    `gemini-flash-latest` ("Smarter, can be slow/busy"), `gemini-3.5-flash-lite`, `gemini-3.5-flash`.
-> 2. **`cfg.thinking` values are `"auto"` (default) and `"low"`** (not fast/default).
->    * `"auto"`: send **no** `thinkingConfig`. Because thought tokens count against `maxOutputTokens` (observed: 189 of 200 tokens spent thinking → truncated
->      reply with `finishReason: MAX_TOKENS`), always send `maxOutputTokens = requestedMaxTokens + 2048` (cap 8192). Reply length is controlled by the prompt, not the cap.
->    * `"low"`: send `generationConfig.thinkingConfig = { thinkingLevel: "low" }` (accepted by 3.x models). If the API answers 400 mentioning `thinking`
->      → retry once without it and remember per model for the adapter's lifetime.
->    * **Never send `thinkingBudget: 0` or `thinkingLevel: "minimal"`**: `minimal` is rejected by `gemini-3.8-flash`
->      (`400 "Thinking level MINIMAL is not supported for this model"`), `thinkingBudget: 0` is rejected by 3.x lite (`400 "Request contains an invalid argument."`).
-> 3. **Turn rules (verified)**: a conversation may START with a `model` turn (guided-journal opening) — send as is, no synthetic user turn;
->    consecutive same-role turns are accepted but still merge them; a request **ending with a model turn → `400 "Requests ending with a model turn are not supported."`**;
->    an empty text part → `400 "Request has empty input."` — the adapter drops empty messages before sending and, if nothing is left, throws `bad_request` without calling the API.
-> 4. **`models.list` reality**: field is `supportedGenerationMethods` (confirmed), 62 entries on one page, entries also carry `thinking: true`, `inputTokenLimit`, `outputTokenLimit`.
->    The list contains many non-chat ids (`lyria-*`, `antigravity-*`, `deep-research-*`, `nano-banana*`, `gemini-nano-banana-*`, `*-tts`, `*-image*`,
->    `gemini-3.5-transcribe`, `gemini-omni-*`, `gemini-robotics-*`, `gemini-*-computer-use-*`, `*-customtools`, embeddings/imagen/veo) **and retired models that 404**
->    (`gemini-2.5-flash` → `404 NOT_FOUND "This model models/gemini-2.5-flash is no longer available to new users. Please update your code to use models/gemini-3.8-flash…"`).
->    So: **allow-list** ids matching `^(gemini|gemma)-` (plus the `-latest` aliases), then drop ids matching
->    `/embed|aqa|imagen|veo|tts|image|banana|live|audio|transcribe|omni|robotics|computer-use|customtools|learnlm|lyria/`; require `generateContent` in `supportedGenerationMethods`;
->    sort `*-latest` aliases first, then newest first (descending natural order). Model errors of the "no longer available" kind map to `model_not_found` and the hint
->    **quotes Google's own suggestion** ("Google suggests gemini-3.8-flash — pick a model from *Load models*"). Gemma models (`gemma-4-*`) work, with systemInstruction.
-> 5. **Error codes seen live**: bad key `400 INVALID_ARGUMENT / API_KEY_INVALID`; no key `403 PERMISSION_DENIED`; unknown model `404 NOT_FOUND`; retired model `404 NOT_FOUND`;
->    overload `503 UNAVAILABLE "This model is currently experiencing high demand…"` (arrives after 15+ s) → `overloaded` with the hint "switch to gemini-flash-lite-latest in Settings".
-> 6. SSE frames are `data: {json}\r\n\r\n`; short answers arrive in 2–3 frames; the final frame carries `finishReason` and `usageMetadata` (`thoughtsTokenCount` only when thinking happened).
->    Streaming a *journal-length* reply therefore arrives in few big chunks — the UI must still look good (do not rely on fine-grained deltas).
-
----------------------------------------------------------------------------------------------------
-
-
-A private, AI-guided journal (think: Rosebud-style guided journaling with an AI that asks follow-up
-questions, remembers you, and surfaces patterns). **Bring your own model**:
+A private, AI-guided journal: an AI companion asks follow-up questions, remembers the person, tracks mood and writes weekly reflections. **Bring your own model**:
 
 | Provider id | What it is | Needs key | Default base URL |
 |---|---|---|---|
-| `gemini` | Google Gemini API (free tier via AI Studio key) — **native** REST adapter | yes | `https://generativelanguage.googleapis.com` |
+| `gemini` | Google Gemini API (free tier via an AI Studio key), **native** REST adapter | yes | `https://generativelanguage.googleapis.com` |
 | `openai` | Any OpenAI-compatible Chat Completions API (OpenAI, OpenRouter, Groq, Together, DeepSeek, Mistral, …) | yes | `https://api.openai.com/v1` |
-| `local` | Self-hosted small LLM through an OpenAI-compatible server: **Ollama** (default), llama.cpp `llama-server`, LM Studio, vLLM | no (optional) | `http://localhost:11434/v1` |
+| `local` | A self-hosted small LLM behind an OpenAI-compatible server: **Ollama** (default), llama.cpp `llama-server`, LM Studio, vLLM | no (optional) | `http://localhost:11434/v1` |
 
-`openai` and `local` share one adapter (`src/providers/openai.js`); they differ in defaults, UI copy,
-key requirement, timeouts and the optional Ollama helpers (model pull).
+`openai` and `local` share one adapter (`src/providers/openai.js`); they differ in defaults, UI copy, key requirement, timeouts and the Ollama helpers (model download).
 
-AI is **optional**: with no provider configured the app is a plain, fast, private journal.
+AI is **optional**: with no provider configured, or with the AI switched off, the app is a plain, fast, private journal.
 
----------------------------------------------------------------------------------------------------
+This document describes the code as it is. User-facing guides: [README](../README.md), [PROVIDERS](PROVIDERS.md), [PRIVACY](PRIVACY.md). Section numbers (§5 settings, §6 HTTP API, §7 streaming, §8 journal logic, §9 provider layer, §10 server, §11 database) are cited from source comments; keep them stable.
 
-## 1. Hard constraints (read first)
+---
 
-* **Node ≥ 22.13, ESM, zero runtime dependencies.** `npm start` must work after `git clone` with no
-  `npm install`. Use only Node built-ins: `node:http`, `node:sqlite` (`DatabaseSync`, FTS5 is available),
-  `node:crypto`, `node:test`, global `fetch`, `AbortController`, `TextDecoder`, `process.loadEnvFile`.
-  Dev-only deps (e.g. `playwright-core`) are allowed solely for `test/e2e` and must be optional.
-* **Frontend: vanilla JS ES modules, no build step, no CDN, no external fonts**. Must work offline
-  (people run local LLMs offline). Never use `innerHTML` with dynamic data; build DOM with `h()` /
-  `textContent`. A strict CSP is served, so: no inline `<script>`, no inline event handlers,
-  no `style=""` attributes in markup (setting `el.style.x` via JS is fine), no `eval`.
-* **Privacy**: all data stays in a local SQLite file. Secrets (API keys) are never returned by the API
-  (only `apiKeySet`/`apiKeyHint`), never logged, never put in URLs (Gemini key goes in the
-  `x-goog-api-key` header). Request/response bodies are never logged.
-* **Small models are first-class.** Prompts are short, imperative, single-task; no reliance on JSON
-  output from the model; all model output parsing is tolerant with deterministic fallbacks. Context
-  budgets are honoured (Ollama defaults to a 2k–4k context window).
-* **Never lose user writing.** The user's message is persisted *before* any AI call. AI failures never
-  roll back or block saving.
-* Style: 2-space indent, semicolons, single quotes, `const`/`let`, small functions, JSDoc on exported
-  functions, **no TypeScript**, no classes unless modelling errors/handles. Comments explain *why*.
+## 1. Hard constraints
 
----------------------------------------------------------------------------------------------------
+* **Node ≥ 22.13, ESM, zero runtime dependencies.** `npm start` works after `git clone` with no `npm install`. Only Node built-ins are used: `node:http`, `node:sqlite` (`DatabaseSync`, FTS5 available), `node:crypto`, `node:test`, global `fetch`, `AbortController`, `TextDecoder`, `process.loadEnvFile`. Dev-only tools (Playwright for `test/e2e`) are never dependencies of the project; the browser tests look them up at run time and skip when absent.
+* **Frontend: vanilla JS ES modules, no build step, no CDN, no external fonts.** It works offline (people run local LLMs offline). No `innerHTML` with dynamic data (DOM is built with `h()` and `textContent`; `npm run check` fails the build on `innerHTML`, `outerHTML =`, `insertAdjacentHTML`, `eval`, `new Function`, `document.write` anywhere in `public/`). A strict CSP is served: no inline `<script>`, no inline event handlers, no `style=""` attributes in markup (setting `el.style.x` from JS is fine), no `eval`.
+* **Privacy.** All data stays in a local SQLite file. API keys are never returned by the API (only `apiKeySet` / `apiKeyHint` / `apiKeySource`), never logged, never put in URLs (the Gemini key goes in the `x-goog-api-key` header). Request and response bodies are never logged; neither are query strings.
+* **Small models are first-class.** Prompts are short, imperative, single-task; nothing relies on JSON output from a model; all model output is parsed tolerantly with deterministic fallbacks. Context budgets are honoured (Ollama defaults to a 4k window).
+* **Never lose user writing.** The user's message is persisted *before* any AI call. AI failures never roll back or block saving.
+* Style: 2-space indent, semicolons, single quotes, `const`/`let`, small functions, JSDoc on exported functions, **no TypeScript**, no classes unless modelling errors or handles. Comments explain *why*.
 
-## 2. Repository layout and file ownership
+---
 
+## 2. Repository layout (final file list)
+
+```text
+server.js                      entry: loads .env and config, opens the DB, starts the server, shuts down cleanly
+package.json                   scripts only; "dependencies" and "devDependencies" are empty; engines node >=22.13.0
+README.md  .env.example        user documentation; every supported environment variable
+Dockerfile  docker-compose.yml  .dockerignore     container deployment (see below)
+.gitignore                     node_modules/, data/, .env, .env.local, *.log, .DS_Store, test-results/, screenshots/, .scratch/
+
+src/config.js                  env -> config object, .env loader, startup safety rule (isLoopbackHost, assertSafeToStart)
+src/env-keys.js                which env vars can supply a provider key + precedence rule (effectiveApiKey, keyHint)
+src/settings.js                settings defaults, validation, deep-merge, masking, env seeds (shared by server and providers)
+src/providers/                 LLM adapters
+  index.js                     createProvider, describeProviders (catalog rows), re-exports
+  config.js                    PROVIDER_DEFAULTS, resolveProviderConfig (settings + env -> request config)
+  openai.js                    OpenAI-compatible adapter (openai + local), Ollama helpers (isOllama, pullOllamaModel)
+  gemini.js                    Gemini native REST adapter
+  common.js                    shared request loop (retry, self-healing), message validation, JSON/SSE event reader
+  http.js                      timeouts/scopes, network error mapping, URL parsing, retry timing
+  sse.js                       SSE and NDJSON parsers      think-filter.js   <think> block stripper
+  errors.js                    ProviderError, error codes, secret redaction
+src/db/                        SQLite persistence (node:sqlite)
+  index.js                     openDb and the db handle    schema.js     schema + migrations
+  context.js                   statement helpers, transactions   util.js   validation/limits/text helpers
+  entries.js  messages.js  memories.js  reports.js  settings-store.js    repositories
+  search.js                    FTS5 index + search        filters.js     shared entry filters
+  portability.js               export, import, wipe, stats
+src/journal/                   pure journaling logic (no I/O)
+  context.js                   prompt builders       tasks.js      tolerant parsers for model output
+  personas.js  templates.js    voices; 12 guided sessions + prompts of the day
+  safety.js                    crisis detection + static care message
+  insights.js                  streaks and overview   dates.js  text.js  tokens.js    helpers
+src/server/                    HTTP layer
+  app.js                       createApp: wiring, request pipeline, lifecycle
+  http.js                      HttpError, JSON/body helpers, router, SSE writer
+  security.js                  security headers, Host allow-list, CSRF check
+  auth.js                      password, sessions, login limiter       static.js   static files
+  ai-service.js                settings + env -> provider; ai_disabled / ai_not_configured
+  generation.js                reply, wrap-up and weekly jobs; per-entry locks     validate.js   request validation
+  export.js                    Markdown rendering    banner.js   start-up text    logger.js   request log
+  routes/                      auth, settings, providers, catalog, entries, memories, insights, data
+
+public/                        the web app (static, no build)
+  index.html  favicon.svg      css/{base,today,entry,history,insights,memory,settings,onboarding,login}.css
+  js/app.js                    shell: router, settings store, theme, connection banner, auth gating
+  js/theme-init.js             applies the saved theme before first paint (CSP-friendly external script)
+  js/lib/                      api, dom, router, ui, markdown, charts, voice
+  js/views/                    today, entry, history, insights, memory, settings, onboarding, login
+  js/components/               entry-*, today-*, history-*, insights-*, memory-*, settings-*, connection (see §12)
+
+scripts/demo.js                npm run demo: pretend models + sample journal in a temp folder
+scripts/check.js               npm run check: node --check on every script, forbidden constructs in public/
+docs/                          ARCHITECTURE.md (this), PROVIDERS.md, PRIVACY.md
+
+test/{providers,db,journal,server,frontend}/*.test.js     unit + integration (node:test); run by npm test
+test/e2e/*.e2e.js              real-browser journeys (Playwright, optional); run by npm run test:e2e
+test/mocks/                    mock-openai (also Ollama bits), mock-gemini, mock-responder, mock-server, serve.js
+test/fixtures/{gemini-live,ollama-live,llamacpp-live}/    responses recorded from the real services
 ```
-server.js                    entry (thin): loads config, opens DB, starts server        [server agent]
-src/config.js                env → config object                                         [server agent]
-src/settings.js              settings defaults/validation/merge/masking (shared)         [db agent]
-src/providers/               LLM adapters                                                [providers agent]
-  errors.js  index.js  config.js  openai.js  gemini.js  sse.js  think-filter.js  http.js
-src/db/                      SQLite persistence                                          [db agent]
-  index.js  schema.js  entries.js  messages.js  memories.js  reports.js  settings-store.js
-  search.js  portability.js
-src/journal/                 pure journaling logic (no I/O)                              [journal agent]
-  personas.js  templates.js  context.js  tasks.js  safety.js  insights.js  tokens.js  text.js
-src/server/                  HTTP layer                                                  [server agent]
-  app.js  http.js  security.js  static.js  auth.js  generation.js  ai-service.js  routes/*.js
-public/                      frontend (static)
-  index.html  favicon.svg  css/base.css   js/app.js  js/lib/{dom,api,router,ui}.js          [lead, DONE]
-  js/lib/markdown.js (safe markdown-lite → DOM, DONE, shared)                                  [lead, DONE]
-  js/lib/{charts,voice}.js  js/views/*.js  js/components/*.js  css/<view>.css                  [frontend agents]
-test/mocks/                  mock LLM servers (OpenAI-compatible, Gemini, Ollama bits)       [providers agent]
-test/{providers,db,journal,server}/*.test.js     unit + integration (node:test)
-test/e2e/*.e2e.js            browser tests (Playwright, optional)
-scripts/                     demo.js, check.js
-docs/                        ARCHITECTURE.md (this), PROVIDERS.md, PRIVACY.md             [docs agent]
-```
 
-Agents may only create/modify files they own. If you need a change in a file you don't own, write the
-request at the end of your final report (do **not** edit it).
+Runtime needs only `package.json`, `server.js`, `src/` and `public/` (about 1.3 MB, 115 files); the Docker image copies exactly those.
 
----------------------------------------------------------------------------------------------------
+**Container deployment.** `Dockerfile` (`node:22-alpine`, user `1000:1000`, `HOST=0.0.0.0 PORT=3210 JOURNAL_DATA_DIR=/data`, `VOLUME /data`, a healthcheck that fetches `http://127.0.0.1:$PORT/api/health` with Node's own `fetch`, `CMD node --disable-warning=ExperimentalWarning server.js`). Because the image binds `0.0.0.0`, the §10 startup rule makes the container exit unless `JOURNAL_PASSWORD` (or `JOURNAL_INSECURE_ALLOW_NO_AUTH=1`) is set, so the secure setup is the default one. `docker-compose.yml` requires `JOURNAL_PASSWORD`, publishes the port on `127.0.0.1` only, keeps the database in the `journal-data` volume, runs the app read-only with all capabilities dropped (it writes only to `/data`), and has an `ollama` profile (an Ollama service, a one-shot `ollama-pull` service for the model, `LOCAL_LLM_BASE_URL` pointing at it).
+
+---
 
 ## 3. Conventions
 
 * JSON is **camelCase**; SQL columns are snake_case; the repository layer converts.
-* Timestamps: integer **milliseconds since epoch** (`createdAt`, `updatedAt`).
-* Calendar dates: `'YYYY-MM-DD'` strings in the *user's local time* (`entry.date`). The client sends its
-  local date where it matters (`date`, `today`); the server never guesses time zones for streaks.
+* Timestamps: integer **milliseconds since the epoch** (`createdAt`, `updatedAt`).
+* Calendar dates: `'YYYY-MM-DD'` strings in the *user's local time* (`entry.date`). The browser sends its local date where it matters (`date`, `today`); the server never guesses time zones for streaks. Where the client omits `today` (reply and wrap-up requests), the server's own clock supplies "Today is …" in the prompt, which is why containers should set `TZ`.
 * IDs: `crypto.randomUUID()`.
 * Mood: integer `1..5` (1 awful … 5 great) or `null`.
-* Errors over HTTP: status code + `{ "error": { "code": "snake_case", "message": "human readable", "hint"?: "what to try", "fields"?: { "path": "msg" } } }`.
-* The server never sends HTML. All text is plain; the client escapes/renders.
+* Errors over HTTP: a status code plus `{ "error": { "code": "snake_case", "message": "human readable", "hint"?: "what to try", "fields"?: { "path": "msg" } } }`.
+* The server never sends HTML. API bodies are JSON (or `text/markdown` / `text/event-stream`); the client escapes and renders.
 
----------------------------------------------------------------------------------------------------
+---
 
 ## 4. Data model
 
-### JSON shapes (API + JS repos)
+### JSON shapes (API and repositories)
 
 ```jsonc
-// Entry — one journaling session (a conversation that starts with the user's writing)
+// Entry: one journaling session (a conversation that starts with the user's writing)
 {
   "id": "uuid", "createdAt": 1760000000000, "updatedAt": 1760000000000,
   "date": "2026-10-08",
@@ -133,10 +121,10 @@ request at the end of your final report (do **not** edit it).
   "tags": ["work"],                    // lowercase, ≤8, ≤24 chars each
   "summary": "string (1–2 sentences, '' until wrap-up)",
   "status": "open" | "wrapped",
-  "private": false,                    // true ⇒ excluded from memory, related-entry recall, weekly reports
+  "private": false,                    // true: excluded from memory, related-entry recall and weekly reports
   "pinned": false,
-  "wordCount": 123,                    // words in user messages
-  "messageCount": 4
+  "wordCount": 123,                    // words in user messages (derived)
+  "messageCount": 4                    // derived
 }
 // EntrySummary (list endpoints) = Entry + { "preview": "first ~160 chars of the first user message", "snippet"?: "plain-text search excerpt" }
 
@@ -145,57 +133,64 @@ request at the end of your final report (do **not** edit it).
   "createdAt": 1760000000000,
   "meta": {                       // free-form, all optional
     "kind": "prompt" | "reply" | "wrapup" | "safety",   // assistant messages; absent on user messages
-    "stopped": true,              // generation was cancelled by the user; content is partial
-    "provider": "gemini", "model": "gemini-flash-latest",
+    "stopped": true,              // generation was cancelled or cut short; content is partial
+    "provider": "gemini", "model": "gemini-flash-lite-latest",
     "edited": true } }
 
-// Memory — a short durable fact about the user, always visible/editable/deletable by the user
+// Memory: a short durable fact about the user, always visible, editable and deletable by the user
 { "id": "uuid", "text": "Has a younger sister called Maya", "pinned": false,
   "sourceEntryId": null | "uuid", "createdAt": 0, "updatedAt": 0 }
 
-// Report — AI weekly write-up
+// Report: AI weekly write-up
 { "id": "uuid", "kind": "weekly", "periodStart": "2026-10-02", "periodEnd": "2026-10-08",
   "content": "markdown-lite text", "createdAt": 0, "meta": { "provider": "gemini", "model": "…", "entryCount": 5 } }
 ```
 
-### SQL (src/db/schema.js; `PRAGMA journal_mode=WAL; foreign_keys=ON; user_version` migrations)
+### SQL (`src/db/schema.js`)
+
+`PRAGMA journal_mode=WAL; foreign_keys=ON; secure_delete=ON; busy_timeout=5000`; `user_version` migrations (currently version 1; a database written by a newer build is refused untouched with `schema_too_new`).
 
 ```sql
-entries(rowid implicit, id TEXT UNIQUE NOT NULL, created_at INT, updated_at INT, entry_date TEXT,
-        title TEXT DEFAULT '', kind TEXT, template_id TEXT, mood INT, emotions TEXT /*json*/, tags TEXT /*json*/,
-        summary TEXT DEFAULT '', status TEXT DEFAULT 'open', private INT DEFAULT 0, pinned INT DEFAULT 0,
-        word_count INT DEFAULT 0)
-messages(id TEXT PK, entry_id TEXT REFERENCES entries(id) ON DELETE CASCADE, seq INT, role TEXT, content TEXT,
-         created_at INT, meta TEXT /*json*/, UNIQUE(entry_id, seq))
-memories(id TEXT PK, text TEXT, pinned INT, source_entry_id TEXT /*no FK: survive entry deletion? NO — SET NULL*/, created_at INT, updated_at INT)
-reports(id TEXT PK, kind TEXT, period_start TEXT, period_end TEXT, content TEXT, created_at INT, meta TEXT)
-settings(key TEXT PK, value TEXT /*json*/)
+entries(rid INTEGER PRIMARY KEY AUTOINCREMENT,            -- stable rowid; doubles as the FTS rowid
+        id TEXT NOT NULL UNIQUE, created_at INT, updated_at INT, entry_date TEXT,
+        title TEXT DEFAULT '', kind TEXT CHECK IN ('free','guided'), template_id TEXT,
+        mood INT CHECK NULL OR 1..5, emotions TEXT /*json*/, tags TEXT /*json*/,
+        summary TEXT DEFAULT '', status TEXT CHECK IN ('open','wrapped'),
+        private INT CHECK IN (0,1), pinned INT CHECK IN (0,1), word_count INT DEFAULT 0)
+messages(id TEXT PRIMARY KEY, entry_id TEXT REFERENCES entries(id) ON DELETE CASCADE, seq INT,
+         role TEXT CHECK IN ('user','assistant'), content TEXT, created_at INT, meta TEXT /*json*/,
+         UNIQUE(entry_id, seq))
+memories(id TEXT PRIMARY KEY, text TEXT, text_norm TEXT /*dedupe key*/, pinned INT,
+         source_entry_id TEXT REFERENCES entries(id) ON DELETE SET NULL,   -- the fact outlives its entry
+         created_at INT, updated_at INT)
+reports(id TEXT PRIMARY KEY, kind TEXT, period_start TEXT, period_end TEXT, content TEXT, created_at INT, meta TEXT)
+settings(key TEXT PRIMARY KEY, value TEXT /*json; one row, key 'app'*/)
 entry_search  -- FTS5(entry_id UNINDEXED, title, body, tags, tokenize='unicode61 remove_diacritics 2', prefix='2 3')
-              -- one row per entry; body = concatenated *user* message text; rewritten whenever title/messages/tags change
+              -- one row per entry (rowid = entries.rid); body = the *user* messages' text; tags = tags + emotions;
+              -- rewritten in the same transaction whenever title, messages or labels change
 ```
 
-Indexes: `entries(created_at DESC)`, `entries(entry_date)`, `messages(entry_id, seq)`.
+Indexes: `entries(created_at DESC, id DESC)`, `entries(entry_date)`, `memories(text_norm)`, `memories(source_entry_id)`, `reports(created_at DESC)`, plus the one `UNIQUE(entry_id, seq)` gives. FTS tables cannot have foreign keys, so the repositories keep `entry_search` in sync themselves. A start-up self-check rebuilds the index if its row count differs from `entries`.
 
----------------------------------------------------------------------------------------------------
+---
 
-## 5. Settings
+## 5. Settings and configuration
 
-Stored as one JSON document (`settings` table, key `app`). Defaults live in `src/settings.js`
-(`DEFAULT_SETTINGS`). **Internal** shape (has raw keys; never leaves the server):
+Settings are one JSON document (`settings` table, key `app`). Defaults live in `src/settings.js` (`DEFAULT_SETTINGS`). The **internal** shape has raw keys and never leaves the server:
 
 ```jsonc
 {
   "onboarded": false,
-  "profile": { "name": "", "about": "" },                       // about ≤ 1000 chars: "things my companion should know"
+  "profile": { "name": "", "about": "" },                       // name ≤ 80, about ≤ 1000 chars: "things my companion should know"
   "persona": { "id": "companion", "custom": "" },               // id ∈ companion|coach|cbt|stoic|friend|custom ; custom ≤ 1500 chars
   "memory":  { "enabled": true, "autoExtract": true, "useRelatedEntries": true },
   "ai": {
     "enabled": true,
-    "provider": "",                                             // "" (unconfigured) | "gemini" | "openai" | "local"
+    "provider": "",                                             // "" (none chosen) | "gemini" | "openai" | "local"
     "temperature": 0.7,                                         // 0..2
     "maxTokens": 700,                                           // 64..8192 reply cap
-    "contextBudgetTokens": 3000,                                // 500..32000 approx. prompt budget (history + memory)
-    "timeoutSec": 120,                                          // first-byte timeout; local cold-starts can be slow
+    "contextBudgetTokens": 3000,                                // 500..32000 approximate prompt budget (history + memory)
+    "timeoutSec": 120,                                          // 5..600 first-byte timeout; local cold starts can be slow
     "providers": {
       "gemini": { "baseUrl": "https://generativelanguage.googleapis.com", "model": "gemini-flash-lite-latest", "thinking": "auto", "apiKey": "" },   // thinking: "auto" | "low"
       "openai": { "baseUrl": "https://api.openai.com/v1", "model": "gpt-4o-mini", "apiKey": "" },
@@ -205,383 +200,348 @@ Stored as one JSON document (`settings` table, key `app`). Defaults live in `src
 }
 ```
 
-**Public** shape (`GET /api/settings`, `PUT` response): identical, except every `providers.*` object has
-`apiKey` removed and gains `apiKeySet: boolean`, `apiKeyHint: string` (`"…abcd"` last 4 chars, `""` if none)
-and `apiKeySource: "settings" | "env" | "none"`.
+(`SETTINGS_LIMITS` in `src/settings.js` is the single source for these numbers: model ≤ 200 chars, API key ≤ 512 visible ASCII characters, base URL ≤ 2048.)
 
-**PUT** takes a *partial* document, deep-merged. In `providers.<id>`, `apiKey: "<string>"` sets the key,
-`apiKey: null` clears the saved key (env fallback then applies), omitted keeps it. Unknown keys are
-dropped, numbers clamped, strings trimmed/length-limited, URLs must be `http(s)`; failures → `400 invalid_settings` with `fields`.
+**Public** shape (`GET /api/settings`, and the answer to `PUT`): identical, except every `providers.*` object has `apiKey` removed and gains `apiKeySet: boolean`, `apiKeyHint: string` (`"…abcd"`, the last 4 characters; `"…"` for keys shorter than 8; `""` without a key) and `apiKeySource: "settings" | "env" | "none"`.
 
-**Env fallbacks** (UI-saved value wins, env fills the gap, `apiKeySource` reports which):
-`GEMINI_API_KEY` (or `GOOGLE_API_KEY`), `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `LOCAL_LLM_API_KEY`,
-`LOCAL_LLM_BASE_URL`, `LOCAL_LLM_MODEL`. Env base URLs/model only seed *defaults* for a fresh DB.
+**PUT** takes a *partial* document that is deep-merged and validated all-or-nothing. In `providers.<id>`, `apiKey: "<string>"` sets the key (whitespace is stripped), `apiKey: null` clears the saved key (the environment then applies again), omitted keeps it. The read-only `apiKeySet` / `apiKeyHint` / `apiKeySource` fields are ignored, so the client can send public settings back unchanged. Unknown keys are dropped, numbers are clamped, strings are trimmed and length-limited, base URLs must be `http(s)://host…` with no credentials, query string or fragment (a trailing slash is removed); failures return `400 invalid_settings` with `fields`. The response is the **public settings with the environment's URL/model seeds applied**, i.e. exactly what the next `GET` and the providers will use.
 
-Server config env (`src/config.js`): `PORT` (3210), `HOST` (127.0.0.1), `JOURNAL_DATA_DIR` (./data),
-`JOURNAL_PASSWORD`, `JOURNAL_ALLOWED_HOSTS`, `JOURNAL_INSECURE_ALLOW_NO_AUTH=1`.
-A `.env` file in the CWD is loaded with `process.loadEnvFile()` if present (real env wins).
+**Environment.**
 
----------------------------------------------------------------------------------------------------
+* Provider keys: `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), `OPENAI_API_KEY`, `LOCAL_LLM_API_KEY`. A key saved in Settings wins; the environment fills the gap; `apiKeySource` says which. Environment keys are never written to the database.
+* URL and model seeds: `OPENAI_BASE_URL`, `LOCAL_LLM_BASE_URL`, `LOCAL_LLM_MODEL`. They only replace values that still equal the built-in default and are ignored when invalid. Because `PUT` merges over the seeded settings, the first Save persists whatever the person saw, seeds included, after which changing the variable has no effect.
+* Server configuration (`src/config.js`): `PORT` (3210; `0` = any free port), `HOST` (`127.0.0.1`), `JOURNAL_DATA_DIR` (`./data`, resolved against the current directory), `JOURNAL_PASSWORD`, `JOURNAL_ALLOWED_HOSTS` (comma separated `host` or `host:port`; a pasted URL is forgiven), `JOURNAL_INSECURE_ALLOW_NO_AUTH` (`1`, `true` or `yes`). `loadConfig(env, { cwd, overrides })` also yields the internal limits: JSON bodies 1 MB, import 50 MB, SSE ping 15 s, session TTL 30 days, 5 login failures per 60 s, shutdown grace 2 s.
+* `.env`: `server.js` calls `process.loadEnvFile()` on `.env` in the current directory if it exists; variables already in the real environment win. Node's own variables (`NODE_USE_ENV_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`) are read before the app starts, so putting them in `.env` is too late (verified).
+
+---
 
 ## 6. HTTP API
 
-All under `/api`, JSON in/out (`Content-Type: application/json`) unless stated. **Every non-GET request
-must carry header `X-MyJournal: 1`** (CSRF defence; the browser client adds it). Endpoints marked
-**SSE** respond `200 text/event-stream` (see §7) *after* validation; validation/precondition failures
-return normal JSON errors **before** the stream starts.
+Everything is under `/api`, JSON in and out (`Content-Type: application/json`) unless stated. **Every non-GET request must carry `X-MyJournal: 1`** (CSRF defence; the browser client adds it). Endpoints marked **SSE** answer `200 text/event-stream` (§7) *after* validation; validation and precondition failures are normal JSON errors **before** the stream starts. `HEAD` is served by the matching `GET`. A path that matches a route with other methods only answers `405 method_not_allowed` with an `Allow` header; an unknown path answers `404 not_found`.
 
-### Auth (only meaningful when `JOURNAL_PASSWORD` is set)
-| | | |
+### Auth (meaningful when `JOURNAL_PASSWORD` is set)
+| Method | Path | Result |
 |---|---|---|
-| GET | `/api/health` | `{ ok: true, version }` — public |
-| GET | `/api/auth/status` | `{ required: bool, authenticated: bool }` — public |
-| POST | `/api/auth/login` `{password}` | `{ ok: true }` + `Set-Cookie: mj_session=…; HttpOnly; SameSite=Strict; Path=/` · `401 invalid_password` · `429 rate_limited` (5 failures/min/IP) |
-| POST | `/api/auth/logout` | `{ ok: true }` |
+| GET | `/api/health` | `{ ok: true, version }`, public |
+| GET | `/api/auth/status` | `{ required, authenticated }`, public |
+| POST | `/api/auth/login` `{password}` | `{ ok: true }` + `Set-Cookie: mj_session_<port>=…; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` (+ `Secure` when `X-Forwarded-Proto: https`) · `401 invalid_password` · `400 bad_request` (no password) · `429 rate_limited` with `Retry-After` (5 failures per minute per client address). Without a password configured it answers `{ ok: true }` and sets nothing. |
+| POST | `/api/auth/logout` | `{ ok: true }` and clears the cookie |
 
-When auth is required every other `/api/*` returns `401 unauthorized` until logged in. Static files are public.
+The session cookie is named `mj_session_<port>` (the port the *server* listens on, so two journals on `localhost` do not sign each other out and the name survives a reverse proxy). When a password is set, every other `/api/*` path answers `401 unauthorized` until a session exists, **including unknown paths** (checked before routing). Static files are public.
 
-### Settings & providers
-| | | |
+### Settings and providers
+| Method | Path | Result |
 |---|---|---|
-| GET | `/api/settings` | public Settings |
-| PUT | `/api/settings` (partial) | public Settings · `400 invalid_settings` |
-| GET | `/api/providers` | `{ active, providers: [{ id, label, tagline, description, needsKey, defaultBaseUrl, defaultModel, keyUrl?, privacyNote, suggestedModels: [{id,label,note?}], configured, keySource }] }` |
-| POST | `/api/providers/test` `{ provider, config?: {baseUrl?,model?,apiKey?} }` | **always 200** for valid input: `{ ok, provider, model, latencyMs, sample?, error?: {code,message,hint?} }`. `config` overlays saved settings so users can test before saving. `400` for unknown provider. |
-| POST | `/api/providers/models` `{ provider, config? }` | `{ ok, models: [{id,label}], error? }` |
-| POST | `/api/providers/local/pull` `{ model, config?: {baseUrl?} }` **SSE** | Ollama only (native `/api/pull` at base URL minus `/v1`). Events `progress {status, completed?, total?, percent?}`, `done {}`, `error`. `409 not_ollama` if `/api/version` fails. |
+| GET | `/api/settings` | public settings (§5) |
+| PUT | `/api/settings` (partial) | public settings with env seeds applied · `400 invalid_settings` |
+| GET | `/api/providers` | `{ active, providers: [{ id, label, tagline, description, needsKey, keyUrl?, privacyNote, suggestedModels: [{id,label,note?}], presets: [{id,label,baseUrl}], defaultBaseUrl, defaultModel, configured, keySource }] }`. `presets` is `[]` for Gemini, four for `openai` (OpenAI, OpenRouter, Groq, Together), three for `local` (Ollama, llama.cpp, LM Studio). |
+| POST | `/api/providers/test` `{ provider, config?: {baseUrl?,model?,apiKey?} }` | **always 200** for valid input: `{ ok, provider, model, latencyMs?, sample?, error?: {code,message,hint?} }`. `config` overlays the saved settings for this one call (never stored) so people can test before saving; the key is scrubbed from the answer. Timeout capped at 90 s. `400` for an unknown provider. |
+| POST | `/api/providers/models` `{ provider, config? }` | `{ ok, models: [{id,label}], error? }`. Timeout capped at 20 s. |
+| POST | `/api/providers/local/pull` `{ model, config?: {baseUrl?} }` **SSE** | Ollama only: native `POST {root}/api/pull`, `root` = base URL minus `/v1`. Events `progress {status, completed?, total?, percent?}`, `done {}`, `error`. `409 not_ollama` if `GET {root}/api/version` does not look like Ollama; `409 generation_in_progress` if a download is running; `400` for a bad model name. |
 
 ### Catalog
-| GET | `/api/catalog?date=YYYY-MM-DD` | `{ templates: [Template], personas: [{id,name,description}], promptOfTheDay: {id, text} }` |
+| Method | Path | Result |
 |---|---|---|
+| GET | `/api/catalog?date=YYYY-MM-DD` | `{ templates: [Template], personas: [{id,name,description}], promptOfTheDay: {id, text} }` |
 
-`Template` = `{ id, title, category: "Daily"|"Mind"|"Growth"|"Creative", description, icon, opening, minutes }`
-(`guidance` stays server-side).
+`Template` = `{ id, title, category: "Daily"|"Mind"|"Growth"|"Creative", description, icon, opening, minutes }` (`guidance` stays server-side).
 
 ### Entries
-| | | |
+| Method | Path | Result |
 |---|---|---|
-| GET | `/api/entries?limit=30&before=<createdAt>&q=&mood=&tag=&from=&to=&pinned=1` | `{ entries: [EntrySummary], nextBefore: number \| null }`. With `q`: FTS ranked, `nextBefore` is `null` (single page, max 50), `snippet` filled. `from`/`to` are `YYYY-MM-DD` inclusive. |
-| POST | `/api/entries` `{ kind?, templateId?, title?, mood?, date?, private?, content? }` | `201 { entry, messages }`. `templateId` ⇒ `kind: "guided"` and seeds one assistant message (`meta.kind:"prompt"`, text = template `opening`, **no AI call**). `content` ⇒ also creates the first user message. |
+| GET | `/api/entries?limit=30&before=<createdAt>&beforeId=&q=&mood=&tag=&from=&to=&pinned=1` | `{ entries: [EntrySummary], nextBefore: number \| null }`, newest first. `limit` 1–200. Pages are cut with `db.entries.page()`, so entries that share a `createdAt` are never split across pages: **a page may hold more than `limit` entries** (such a run is read to its end), and `nextBefore` (the last entry's `createdAt`) means "strictly older". With `q`: ranked full-text search, a single page of at most 50 (`nextBefore` is `null`), `snippet` filled, the other filters still apply. `from`/`to` are `YYYY-MM-DD`, inclusive. |
+| POST | `/api/entries` `{ kind?, templateId?, title?, mood?, date?, private?, content? }` | `201 { entry, messages }`. A `templateId` makes it `kind: "guided"` and seeds one assistant message (`meta.kind:"prompt"`, the template's `opening`; **no AI call**). `content` also creates the first user message. |
 | GET | `/api/entries/:id` | `{ entry, messages }` · `404 not_found` |
 | PATCH | `/api/entries/:id` `{ title?, mood?, tags?, emotions?, private?, pinned?, date? }` | `{ entry }` |
-| DELETE | `/api/entries/:id` | `204` |
-| POST | `/api/entries/:id/messages` `{ content }` | `201 { message, entry }` — appends a **user** message (no AI). Empty/whitespace → `400`. Max 20 000 chars. |
+| DELETE | `/api/entries/:id` | `204`; aborts a reply being written for it |
+| POST | `/api/entries/:id/messages` `{ content }` | `201 { message, entry }`: appends a **user** message (no AI). Blank → `400`; more than 20 000 characters → `413 payload_too_large`. |
 | PATCH | `/api/entries/:id/messages/:mid` `{ content }` | `{ message, entry }` (sets `meta.edited`) |
 | DELETE | `/api/entries/:id/messages/:mid` | `{ entry }` |
-| POST | `/api/entries/:id/reply` `{ regenerate?: boolean }` **SSE** | AI reply to the conversation as it stands. Preconditions (JSON errors): `409 ai_disabled`, `409 ai_not_configured`, `409 generation_in_progress`, `409 nothing_to_reply_to` (last message isn't a user message and `regenerate` is false). `regenerate:true` first deletes the trailing assistant `reply` message. |
-| POST | `/api/entries/:id/wrap-up` **SSE** | Closing reflection + metadata + memories (see §7). Same preconditions as reply. |
+| POST | `/api/entries/:id/reply` `{ regenerate?, today? }` **SSE** | AI reply to the conversation as it stands. Preconditions, in this order, as JSON errors: `404 not_found`, `409 ai_disabled`, `409 ai_not_configured`, `409 generation_in_progress`, `409 nothing_to_reply_to` (the last message is not the user's and `regenerate` is false). `regenerate: true` first deletes the trailing assistant `reply` (only once every refusal is behind it). |
+| POST | `/api/entries/:id/wrap-up` `{ today? }` **SSE** | Closing reflection + metadata + memories (§7). Same preconditions. |
 | GET | `/api/entries/:id/export.md` | `text/markdown` attachment |
 
 ### Memories
-| GET | `/api/memories` | `{ memories: [Memory] }` (pinned first, then newest) |
+| Method | Path | Result |
 |---|---|---|
-| POST | `/api/memories` `{ text, pinned? }` | `201 { memory }` (text ≤ 300 chars) |
+| GET | `/api/memories` | `{ memories: [Memory] }` (pinned first, then newest) |
+| POST | `/api/memories` `{ text, pinned? }` | `201 { memory }` (text ≤ 300 characters) |
 | PATCH | `/api/memories/:id` `{ text?, pinned? }` | `{ memory }` |
 | DELETE | `/api/memories/:id` | `204` |
 | POST | `/api/memories/clear` | `{ ok: true, removed }` |
 
 ### Insights
-| GET | `/api/insights/overview?today=YYYY-MM-DD&days=90` | see below |
+| Method | Path | Result |
 |---|---|---|
+| GET | `/api/insights/overview?today=YYYY-MM-DD&days=90` | see below (`days` 1–3660) |
 | GET | `/api/insights/reports` | `{ reports: [Report] }` newest first |
-| POST | `/api/insights/weekly` `{ today?, days? = 7 }` **SSE** | `422 not_enough_entries` if no non-private entries in the window; events `delta`, `done {report}` |
+| POST | `/api/insights/weekly` `{ today?, days? = 7 }` **SSE** | `days` 1–366. `409 ai_*` as above, `422 not_enough_entries` if the window has no non-private entry; events `delta`, `done {report}` |
 | DELETE | `/api/insights/reports/:id` | `204` |
 
 ```jsonc
-// overview
+// overview: streak and totals cover all entries (private ones too); the rest only the last `days` days
 { "today": "2026-10-08",
-  "streak": { "current": 3, "longest": 12, "lastEntryDate": "2026-10-08" },   // current counts if last entry is today OR yesterday
+  "streak": { "current": 3, "longest": 12, "lastEntryDate": "2026-10-08" },   // current counts if the last entry day is today or yesterday
   "totals": { "entries": 40, "words": 18000, "daysWritten": 31, "wrapped": 22 },
-  "mood":   { "average": 3.6 | null, "series": [{ "date": "2026-10-01", "avg": 3.5, "count": 2 }] },   // only days with a mood, within `days`
-  "calendar": [{ "date": "2026-10-01", "count": 2, "words": 340 }],            // only days with entries, within `days`
-  "emotions": [{ "name": "calm", "count": 7 }],                                 // top 10 within `days`
-  "tags":     [{ "name": "work", "count": 5 }] }                                // top 10 within `days`
+  "mood":   { "average": 3.6 | null, "series": [{ "date": "2026-10-01", "avg": 3.5, "count": 2 }] },   // only days with a mood
+  "calendar": [{ "date": "2026-10-01", "count": 2, "words": 340 }],            // only days with entries
+  "emotions": [{ "name": "calm", "count": 7 }],                                 // top 10
+  "tags":     [{ "name": "work", "count": 5 }] }                                // top 10
 ```
 
 ### Data
-| GET | `/api/data/stats` | `{ entries, messages, memories, reports, dbBytes }` |
+| Method | Path | Result |
 |---|---|---|
-| GET | `/api/data/export?format=json\|markdown` | attachment. JSON: `{ app:"myjournal", version:1, exportedAt, entries:[{...Entry, messages:[Message]}], memories:[], reports:[] }` (settings/keys are **never** exported) |
-| POST | `/api/data/import` *(export JSON as body, ≤ 50 MB)* | `{ imported: {entries,messages,memories,reports}, skipped }` — merge by id, skip existing, validates shape, never executes anything |
-| POST | `/api/data/wipe` `{ confirm: "DELETE", includeSettings?: boolean }` | `{ ok: true }` |
+| GET | `/api/data/stats` | `{ entries, messages, memories, reports, dbBytes }` |
+| GET | `/api/data/export?format=json\|markdown` | attachment `myjournal-export-YYYY-MM-DD.json\|.md`. JSON: `{ app:"myjournal", version:1, exportedAt, entries:[{...Entry, messages:[Message]}], memories:[], reports:[] }`; private entries are included; settings and keys **never** are. |
+| POST | `/api/data/import` (export JSON as the body, ≤ 50 MB) | `{ imported: {entries,messages,memories,reports}, skipped }`: merges by id, skips what exists, validates every field, executes nothing. |
+| POST | `/api/data/wipe` `{ confirm: "DELETE", includeSettings?: boolean }` | `{ ok: true }`; aborts running generations first |
 
 ### Error codes
-`bad_request, invalid_settings, not_found, unauthorized, invalid_password, forbidden_origin, forbidden_host,
-conflict, generation_in_progress, nothing_to_reply_to, payload_too_large, rate_limited, ai_disabled,
-ai_not_configured, not_enough_entries, not_ollama` plus the **provider error codes** of §9 (only inside SSE `error`
-events and `/api/providers/*` bodies).
+Every error is `{ error: { code, message, hint?, fields? } }`.
 
----------------------------------------------------------------------------------------------------
+| Status | Codes |
+|---|---|
+| 400 | `bad_request` (malformed JSON, bad field, bad path), `invalid_settings` (+ `fields`) |
+| 401 | `unauthorized`, `invalid_password` |
+| 403 | `forbidden_origin` (missing `X-MyJournal`, cross-site `Origin` or `Sec-Fetch-Site`), `forbidden_host` |
+| 404 / 405 | `not_found`, `method_not_allowed` (+ `Allow`) |
+| 409 | `conflict`, `generation_in_progress`, `nothing_to_reply_to`, `ai_disabled`, `ai_not_configured`, `not_ollama` |
+| 413 | `payload_too_large` (a message over 20 000 characters, a JSON body over 1 MB, an import over 50 MB) |
+| 422 | `not_enough_entries` |
+| 429 | `rate_limited` (+ `Retry-After`) |
+| 500 | `internal_error` (anything unexpected; details only in the server's terminal, never in the response) |
+| 408 / 431 / 400 | `request_timeout`, `header_too_large`, `bad_request`: answered by the socket-level handler for requests Node rejects before routing; they still carry the security headers |
 
-## 7. SSE protocol (reply, wrap-up, weekly report, model pull)
+Plus the **provider error codes** of §9, which appear only inside SSE `error` events and `/api/providers/*` bodies.
 
-`POST` + `fetch` streaming (not `EventSource`). Frames: `event: <name>\ndata: <single-line JSON>\n\n`.
-A comment frame `: ping\n\n` is sent every 15 s. Headers: `Content-Type: text/event-stream; charset=utf-8`,
-`Cache-Control: no-store`, `X-Accel-Buffering: no`, `Connection: keep-alive`.
+---
+
+## 7. Streaming protocol (reply, wrap-up, weekly reflection, model download)
+
+`POST` + `fetch` streaming (not `EventSource`). Frames are `event: <name>\ndata: <single-line JSON>\n\n`. A `: ping` comment frame goes out every 15 s. Headers: `Content-Type: text/event-stream; charset=utf-8`, `Cache-Control: no-store`, `X-Accel-Buffering: no`, `Connection: keep-alive`. A client that stops reading (more than 8 MB queued) is treated as gone.
 
 | event | data | when |
 |---|---|---|
-| `notice` | `{ kind: "safety", text, message }` or `{ kind: "warn", text }` | `safety`: crisis keywords detected in the last user message — sent first; `message` is the persisted static assistant message (`meta.kind:"safety"`). `warn`: a best-effort step failed (e.g. "Saved without an automatic title: rate limit reached"); the client shows it as a toast. |
-| `phase` | `{ name: "reflection" \| "metadata" \| "memory" }` | wrap-up progress |
+| `notice` | `{ kind: "safety", text, message }` or `{ kind: "warn", text }` | `safety`: crisis phrases were detected in the person's latest message; sent first; `message` is the persisted static assistant message (`meta.kind:"safety"`). `warn`: a best-effort step failed ("Saved without an automatic title or summary: …"); the client shows a toast. |
+| `phase` | `{ name: "reflection" \| "metadata" \| "memory" }` | wrap-up progress; `memory` only when that step will run |
 | `delta` | `{ text }` | streamed assistant text |
-| `entry` | `{ entry }` | entry metadata changed (title, summary, emotions, status…) |
-| `memories` | `{ added: [Memory] }` | wrap-up extracted new memories |
-| `done` | reply: `{ message, entry }` · wrap-up: `{ message, entry, memories }` · weekly: `{ report }` · pull: `{}` | success; persisted objects |
-| `error` | `{ error: { code, message, hint? } }` | failure after the stream started; stream ends. For `reply`, the user message is already persisted; partial text (if any) is kept as a `stopped` message |
+| `entry` | `{ entry }` | entry metadata changed (title, summary, emotions, tags) |
+| `memories` | `{ added: [Memory] }` | **only when the memory step added something** |
+| `done` | reply: `{ message, entry }` · wrap-up: `{ message, entry, memories }` · weekly: `{ report }` · download: `{}` | success; the persisted objects |
+| `error` | `{ error: { code, message, hint? } }` | failure after the stream started; the stream ends |
 
-**Cancellation**: the client aborts the fetch → the server aborts the upstream request, persists the partial
-assistant text (if non-empty) with `meta.stopped = true`, and releases the per-entry lock. Only **one**
-generation per entry at a time (`409 generation_in_progress`).
+**What is persisted when a stream ends early.**
 
-**Wrap-up pipeline** (sequential, never parallel — free-tier rate limits): (1) stream closing reflection
-(`phase reflection`) → persist as `meta.kind:"wrapup"`; (2) `phase metadata`: one small non-streamed call →
-title (only if user hasn't set one), summary, emotions, tags (fallbacks if the model output is unusable);
-(3) `phase memory` (only if `memory.enabled && memory.autoExtract && !entry.private`): one small call →
-0–3 memory facts, deduped against existing memories. Steps 2–3 are best-effort: their failure does not fail wrap-up.
-Finally `entry.status = "wrapped"`.
+* *Reply.* The person's message is already saved. Text received before a client abort, a server shutdown or a provider failure is saved as an assistant message with `meta.stopped = true` (after the same clean-up as a finished reply; nothing is saved when it is empty). A provider failure additionally sends an `error` event. A model that returns nothing at all sends `error` (`empty`) and saves nothing.
+* *Wrap-up and weekly reflection.* **Partial output is not persisted.** A half-written closing reflection or report is dropped: a stopped or failed closing reflection leaves the entry unwrapped, and a stopped or failed weekly run saves no report. Once the reflection itself is saved, stopping only skips the remaining metadata and memory steps and the entry still counts as wrapped.
+* *Download.* Ollama keeps what it fetched; the next run resumes.
 
----------------------------------------------------------------------------------------------------
+**Cancellation.** The client aborts the `fetch`; the server aborts the upstream request and releases the lock. Only **one** generation per key runs at a time: reply and wrap-up share `entry:<id>`, the weekly reflection is `job:weekly`, a model download `job:pull`; a second request is `409 generation_in_progress`.
+
+**Care message.** If the latest message shows crisis phrases (`src/journal/safety.js`, conservative, multi-word patterns), the static region-neutral care message is saved right after it as an assistant message with `meta.kind:"safety"`, **even when the AI is unavailable**; the model prompt also gets a line asking it to put care first. Safety messages are left out of what is sent to the model.
+
+**Wrap-up pipeline** (strictly sequential: free-tier rate limits, small local machines):
+
+1. `phase reflection`: stream the closing reflection, persist it as `meta.kind:"wrapup"`. Failure or abort here ends the job as described above.
+2. `phase metadata`: one small non-streamed call (temperature 0.2, ≤ 160 tokens, the person's own text only). The summary is stored; the title only when the person has not set one; emotions and tags only when empty. Fallbacks come from the person's text when the model output is unusable. Sends `entry`.
+3. `phase memory`, only if `memory.enabled && memory.autoExtract && !entry.private`: one small call (the person's text plus up to 12 known memories to avoid repeats) → 0–3 facts, deduplicated; sends `memories` when any were added.
+
+Steps 2 and 3 are best effort: a failure becomes a `warn` notice and never fails the wrap-up. Finally `entry.status = "wrapped"` and `done`. Wrapping up again adds a further reflection.
+
+**Weekly reflection.** The window is `days` ending at `today` (inclusive); private entries are excluded; at most 200 entries are described (title, summary or a ~300-character excerpt, mood, emotions, tags). The reply cap is at least 600 tokens, whatever the setting.
+
+---
 
 ## 8. Journal logic (`src/journal/*`, pure, synchronous, unit-tested)
 
 ```js
 // tokens.js
-estimateTokens(text) -> number                       // ceil(chars / 3.5); cheap and conservative
-// text.js
-firstWords(text, maxChars) ; truncate(text, maxChars) ; normalizeLabels(list, {max, maxLen}) -> string[] ; wordCount(text)
-extractKeywords(text, {max}) -> string[]             // stopword-filtered, for related-entry search
-// personas.js
-PERSONAS: [{ id, name, description, prompt }] ; getPersona(id) ; resolvePersonaPrompt({id, custom}) -> string
-// templates.js
-TEMPLATES: [{ id, title, category, description, icon, opening, guidance, minutes }] ; getTemplate(id) ; publicTemplate(t)
-promptOfTheDay(dateStr) -> { id, text }              // deterministic per date
-// safety.js
-detectCrisis(text) -> { flagged: boolean, matches: string[] } ; crisisNotice() -> string   // static, kind, region-neutral (988 for US + findahelpline.com)
-// context.js
-buildReplyMessages({ settings, entry, messages, memories, related, now, providerId, templateGuidance }) ->
-   { messages: [{role:'system'|'user'|'assistant', content}], debug: { approxTokens, droppedMessages, memoriesUsed, relatedUsed } }
-buildWrapUpMessages(sameArgs) ; buildMetaMessages({entry,messages,settings}) ; buildMemoryMessages({entry,messages,existingMemories,settings})
-buildWeeklyMessages({ entries, memories, settings, periodStart, periodEnd })
-// tasks.js  (parsers for tolerant model output)
-parseMeta(text, {fallbackTitle}) -> { title, summary, emotions[], tags[] }   // "Title: …\nSummary: …\nEmotions: a, b\nTags: x, y" with fuzzy fallbacks
-parseMemoryLines(text, {existing}) -> string[]                               // "- fact" lines, drops "none", dups, junk; ≤3, ≤200 chars each
-cleanReply(text) -> string                                                    // strips <think>, role prefixes ("Assistant:"), code fences wrapping, trailing whitespace
-// insights.js
-computeOverview({ entries, today, days }) -> overview (see §6)   // entries = minimal rows {date, mood, emotions, tags, wordCount, status}
-computeStreaks(dates, today) -> { current, longest, lastEntryDate }
+estimateTokens(text) -> number          // Latin text: ceil(chars / 3.5), deliberately high (measured 20-35 % above the real count);
+                                        // CJK/Thai/Hangul count 1 token per character, Cyrillic/Greek/Arabic/Indic ½, each emoji 2
+// text.js     cleanText, oneLine, truncate, truncateMiddle, firstWords, normalizeLabels, wordCount, extractKeywords, splitSentences, firstSentences
+// dates.js    parseDateString, addDays, diffDays, formatLongDate, … (all on 'YYYY-MM-DD', no time zones)
+// personas.js PERSONAS (companion, coach, cbt, stoic, friend), CUSTOM_PERSONA, getPersona, publicPersonas, resolvePersonaPrompt({id, custom})
+// templates.js TEMPLATES (12), TEMPLATE_CATEGORIES, getTemplate, publicTemplate, templateStep(t, userTurns), promptOfTheDay(dateStr) (deterministic per date), allPrompts
+// safety.js   detectCrisis(text) -> { flagged, matches[] } ; crisisNotice() -> static text (988 for the US, findahelpline.com elsewhere)
+// context.js  prompt builders (below)
+// tasks.js    tolerant parsers for model output (below)
+// insights.js computeStreaks(dates, today), computeOverview({ entries, today, days }) (shape in §6)
 ```
 
-**Task marker (contract)**: the *system* message of every model call produced by `context.js` starts with a first line
-`TASK: reply` | `TASK: wrapup` | `TASK: meta` | `TASK: memory` | `TASK: weekly`. It costs ~3 tokens, helps debugging, and
-lets the mock LLM servers answer each task in the right format deterministically.
+```js
+// context.js: every builder returns { messages: [{role:'system'|'user'|'assistant', content}], debug: {approxTokens, budget, droppedMessages, memoriesUsed, relatedUsed, compact, truncatedLastUser, ...} }
+buildReplyMessages({ settings, entry, messages, memories, related, now, providerId, templateGuidance, crisis })
+buildWrapUpMessages(sameArgs)          // appends a "write your closing reflection" cue when the conversation ends with an assistant turn
+buildMetaMessages({ entry, messages, settings })                      // the person's own text only
+buildMemoryMessages({ entry, messages, existingMemories, settings })  // the person's text + known facts ("do not repeat")
+buildWeeklyMessages({ entries, memories, settings, periodStart, periodEnd })
+TASK_SAMPLING   // { meta: {temperature 0.2, maxTokens 160}, memory: {…same} }
+// tasks.js
+parseMeta(text, { fallbackTitle, userText, firstMessage }) -> { title, summary, emotions[], tags[] }   // "Title: …\nSummary: …\nEmotions: a, b\nTags: x, y" with fuzzy fallbacks
+parseMemoryLines(text, { existing, userText, userName }) -> string[]   // "- fact" lines; drops "none", duplicates, echoed examples, junk; ≤ 3, ≤ 200 chars
+cleanReply(text) -> string             // strips <think>, role prefixes ("Assistant:"), wrapping code fences, trailing whitespace
+```
 
-**Label formats (contract, used by the parsers and by the mocks)**
-* `meta` → the model is asked for exactly four lines: `Title: …` / `Summary: …` / `Emotions: a, b, c` / `Tags: x, y`.
-* `memory` → bullet lines `- fact`, or the single word `none`.
-* `weekly` → plain paragraphs, optional `**Bold**` lead-ins and `- ` bullets (rendered by the client's markdown-lite).
-* `reply` / `wrapup` → plain prose (markdown-lite allowed: `**bold**`, `*italic*`, `- ` bullets, blank-line paragraphs).
+**Task marker (contract).** The *system* message of every call built by `context.js` starts with a first line `TASK: reply` | `TASK: wrapup` | `TASK: meta` | `TASK: memory` | `TASK: weekly`. It costs a few tokens, helps debugging and lets the mock servers answer each task in the right format.
 
-**Templates**: ids (fixed) — `rose-thorn-bud`, `gratitude`, `morning-intention`, `evening-reflection`, `thought-record`,
-`worry-dump`, `self-compassion`, `goals-checkin`, `relationship-reflection`, `dream-journal`, `weekly-review`, `decision-helper`.
-`icon` must be one of `ICON_NAMES` exported by `public/js/lib/ui.js` (the unit test imports it to enforce this).
+**Label formats.** `meta`: exactly four lines, `Title: …` / `Summary: …` / `Emotions: a, b, c` / `Tags: x, y`. `memory`: bullet lines `- fact`, or the single word `none`. `weekly`: plain paragraphs, optional `**Bold**` lead-ins and `- ` bullets (rendered by the client's markdown-lite). `reply` / `wrapup`: plain prose (markdown-lite allowed).
 
-**Prompt design rules** (these matter for 1B–3B models): system prompt ≤ ~350 tokens; imperative bullet rules;
-exactly one question per reply; 2–4 sentences; reply in the user's language; no lists unless asked; never
-diagnose; one task per call; metadata/memory calls use *labelled plain-text lines*, never JSON; temperature for
-metadata/memory calls is forced low (0.2). Memory block and related-entry block are each capped (~600 / ~700 tokens)
-and **dropped first** when the budget is tight, then the oldest conversation turns (never the latest user
-message, never the system prompt). Messages passed to adapters are strictly `system?` then `user`/`assistant`
-turns; consecutive same-role turns are merged by the context builder; `meta.kind === "safety"` messages are
-omitted from context.
+**Templates** (ids are fixed): `rose-thorn-bud`, `gratitude`, `morning-intention`, `evening-reflection`, `thought-record`, `worry-dump`, `self-compassion`, `goals-checkin`, `relationship-reflection`, `dream-journal`, `weekly-review`, `decision-helper`. `icon` must be one of `ICON_NAMES` exported by `public/js/lib/ui.js` (a unit test enforces it).
 
----------------------------------------------------------------------------------------------------
+**Prompt design rules** (they matter for 1B–3B models): the base system prompt is small (about 320 estimated tokens for a reply, 350 for a wrap-up, 170 and 195 for the title and memory steps, before your name, About text, memories and related entries are added); imperative bullet rules; exactly one question per reply; 2–4 sentences; reply in the person's language; no lists unless asked; never diagnose; one task per call; labelled plain-text lines instead of JSON for metadata and memory (temperature forced to 0.2).
+
+**Budget.** The prompt is kept within `settings.ai.contextBudgetTokens` (as estimated above). When it does not fit, in this order: related-entry lines go (least relevant first), then memory lines (unpinned before pinned, oldest first), then the oldest conversation turns, then a shorter system prompt (compact, then minimal), and finally the middle of the latest message. One huge old turn is shortened up front so it cannot push every other turn out. The memory block is capped at 600 tokens and 20 % of the budget, the related-entry block at 700 tokens and 25 %; they hold at most 8 memories and 2 related entries for `local`, 20 and 4 otherwise. Consecutive same-role turns are merged; `meta.kind === "safety"` messages are omitted.
+
+---
 
 ## 9. Provider layer (`src/providers/*`)
 
 ```js
 // index.js
-createProvider(id, cfg, { fetch? }) -> Provider      // cfg = resolved config (below). fetch injectable for tests.
+createProvider(id, cfg, { fetch?, sleep?, idleTimeoutMs? }) -> Provider      // cfg = resolved config; fetch/sleep injectable for tests
 describeProviders(env) -> catalog rows for GET /api/providers (without `configured`)
 // config.js
-resolveProviderConfig(id, settings, env) -> { id, baseUrl, model, apiKey, keySource, thinking?, timeoutMs }
+resolveProviderConfig(id, settings, env) -> { id, baseUrl, model, apiKey, keySource, thinking?, timeoutMs, temperature?, maxTokens? }
 // Provider
 { id, label,
   stream(req) -> AsyncGenerator<{type:'delta', text} | {type:'done', finishReason, usage?}>,
-  chat(req)   -> Promise<{ text, finishReason, usage? }>,           // drains stream(); applies cleanReply-equivalent <think> stripping
+  chat(req)   -> Promise<{ text, finishReason, usage? }>,           // drains stream()
   listModels({signal}) -> Promise<[{id,label}]>,
-  test({signal}) -> Promise<{ ok: true, model, latencyMs, sample }>  // throws ProviderError on failure
-}
+  test({signal}) -> Promise<{ ok: true, model, latencyMs, sample }>, // throws ProviderError on failure
+  isOllama(), pullModel({model, signal}) }                          // local provider only
 // req = { messages:[{role,content}], temperature?, maxTokens?, signal?: AbortSignal, timeoutMs? }
 ```
 
-`ProviderError` (`errors.js`): `{ name, code, message (user-friendly), hint?, status?, retryAfterMs?, provider, cause? }`.
-Codes: `auth`, `rate_limit`, `quota`, `model_not_found`, `bad_base_url`, `network`, `timeout`, `blocked`,
-`context_too_long`, `bad_request`, `server`, `overloaded`, `region`, `empty`, `unknown`.
-A caller abort throws the standard `AbortError` (`err.name === 'AbortError'`), **not** a `ProviderError`.
-Messages must be actionable and must **never** contain the API key.
+`ProviderError` (`errors.js`): `{ name, code, message (user-friendly), hint?, status?, retryAfterMs?, provider, detail?, cause? }`. Codes: `auth`, `rate_limit`, `quota`, `model_not_found`, `bad_base_url`, `network`, `timeout`, `blocked`, `context_too_long`, `bad_request`, `server`, `overloaded`, `region`, `empty`, `unknown`. A caller abort throws the standard `AbortError` (`err.name === 'AbortError'`), **not** a `ProviderError`. Messages are actionable and **never contain the API key**: the key and its URL-encoded form are scrubbed from the message, hint, detail and the sanitised `cause`. The user-facing wording of every code is tabulated in [PROVIDERS.md](PROVIDERS.md#troubleshooting-every-error-code).
 
 ### Shared HTTP behaviour
-Node's global `fetch` ignores `HTTPS_PROXY` unless the process runs with `NODE_USE_ENV_PROXY=1` (Node ≥ 22.21). We do not
-re-implement proxying; docs tell users behind a corporate proxy to set it. (In this dev sandbox every live probe needs it.)
-First-byte timeout = `timeoutMs`; idle timeout between chunks = 60 s; both produce `timeout` (hint: for local
-models the first request loads the model, try again). Network failure → `network` with a hint naming the URL
-that was tried (and, for `local`, "is Ollama running? `ollama serve`"). At most **one** automatic retry for
-transient `429` with `retryAfterMs ≤ 8000` and for `503`; never retry after any delta was emitted.
+Node's global `fetch` ignores `HTTPS_PROXY` unless the process runs with `NODE_USE_ENV_PROXY=1` (Node 22.21+; verified: the variable must be in the real environment, `.env` is too late, and `NO_PROXY` must list `localhost,127.0.0.1` or local-model traffic goes to the proxy too). We do not re-implement proxying; the docs tell people to set it. The first-byte timeout is `timeoutMs` (settings `timeoutSec`, default 120 s; Node/undici itself gives up on response headers after 300 s, so more cannot be honoured); the idle timeout between chunks is 60 s; both produce `timeout` (for local models the hint says the first request loads the model and that giving up cancels the load). A network failure becomes `network` with a hint naming the URL that was tried (and, for `local`, "Is Ollama running? Start it with `ollama serve`…"); certificate problems mention `NODE_EXTRA_CA_CERTS`. **One** automatic retry for a `429` or `503` whose wait is ≤ 8 s (1 s if the server named none); never after any text was emitted. Up to two (local: three) *self-healing* retries after a `400` that names a parameter (below).
 
 ### OpenAI-compatible adapter (`openai` + `local`)
-* Endpoint normalization: trim, strip trailing `/`, strip a trailing `/chat/completions`; for `local`, if the URL has
-  no path (e.g. `http://localhost:11434`) append `/v1`. Request goes to `${base}/chat/completions`.
-* Headers: `Content-Type: application/json`, `Accept: text/event-stream`, `Authorization: Bearer <key>` only if a key exists.
-* Body: `{ model, messages, stream: true, temperature, <token param>, stream_options: { include_usage: true } }`.
-  Token param is `max_completion_tokens` when the host is `api.openai.com`, else `max_tokens`.
-  **Self-healing on `400`**: if the error text mentions `max_tokens`/`max_completion_tokens` flip the param; mentions
-  `temperature` → drop it; mentions `stream_options` → drop it. Retry (max 2 adaptations), remember per adapter instance.
-* Streaming parse (`sse.js`, shared): handles `\r\n`, chunk boundaries inside lines/UTF-8, `: comments`, `data: [DONE]`.
-  Text = `choices[0].delta.content` (ignore `reasoning_content` / `reasoning`); finish = `choices[0].finish_reason`;
-  usage from the final chunk if present. If the server answers with `application/json` instead of SSE, read
-  `choices[0].message.content`.
-* `think-filter.js`: stateful filter removing `<think>…</think>` (and `<thinking>`, `<reasoning>`) blocks even when the tags
-  split across chunks; leading whitespace after a removed block is trimmed. If the stream ends inside an unterminated
-  `<think>` and nothing was emitted → `ProviderError('empty')` with hint "the model spent its whole token budget
-  thinking — raise max tokens or use a non-reasoning model".
-* Error mapping: `401/403` → `auth`; `404` → `model_not_found` if body mentions the model, else `bad_base_url`;
-  `429` → `quota` if body has `insufficient_quota`/`billing`, else `rate_limit` (honour `retry-after`);
-  `400` + `context_length`/`maximum context` → `context_too_long`; `5xx` → `server`; refused/DNS → `network`.
-  An empty successful stream → `empty`.
-* `listModels`: `GET ${base}/models` → `data[].id` sorted alphabetically; tolerate `{models:[…]}` and bare arrays.
-* `test`: one tiny streamed request (`max tokens 16`, "Reply with the single word: OK"), success on any 2xx stream even
-  if the sample is empty (reasoning models) — `sample` is whatever came back.
-* Ollama helper: `pullModel({model, signal}) -> AsyncGenerator<progress>` (native `POST {root}/api/pull`, NDJSON) and
-  `isOllama()` (`GET {root}/api/version`), where `{root}` is the base URL with `/v1` stripped.
+
+* **Address.** Trimmed, trailing `/` and a trailing `/chat/completions` removed; a bare host gets `/v1` for `local` and for `api.openai.com`. Credentials, a `?query` and non-http(s) schemes are rejected (`bad_base_url`). The request goes to `${base}/chat/completions`.
+* **Headers:** `Content-Type: application/json`, `Accept: text/event-stream`, `Authorization: Bearer <key>` only if a key exists.
+* **Body:** `{ model, messages, stream: true, temperature, <token param>, stream_options: { include_usage: true } }`, plus `reasoning_effort: "none"` for `local` only (live-verified against Ollama 0.40.1 and llama.cpp: thinking models answer in ~1.7 s instead of 8–14 s; other models ignore it). The token parameter is `max_completion_tokens` for host `api.openai.com` and `max_tokens` everywhere else (Ollama silently ignores `max_completion_tokens`).
+* **Self-healing on `400`:** if the error text names the token parameter, flip it; `temperature` or `stream_options`, drop it; `reasoning_effort` or "think", drop it. What worked is remembered per `provider|base|model` for the life of the process.
+* **Reading the answer (`sse.js`, `common.js`).** Handles `\r\n`, chunk boundaries inside lines and UTF-8 sequences, `: comments`, `data: [DONE]`, and servers that answer with one JSON document instead of a stream. Text is `choices[0].delta.content`; `reasoning_content` / `reasoning` are ignored; finish is `choices[0].finish_reason`; usage comes from the last chunk. `think-filter.js` strips `<think>…</think>` (and `<thinking>`, `<reasoning>`) blocks even when the tags split across chunks and trims the whitespace after a removed block. A stream that ends inside an unfinished `<think>` with nothing emitted is `empty` ("the model spent its whole token budget thinking…"). A page or plain text where an API reply should be is `bad_base_url`.
+* **Error mapping.** Redirects → `bad_base_url`; `413` or context-overflow wording (`context_length`, `maximum context`, `exceeds the available context size`, …; the hint quotes the two token numbers when the server gives them) → `context_too_long`; `401`/`403` → `auth` (a `403` about country/region → `region`); `404` → `model_not_found` if the body names the model, else `bad_base_url`; `408` → `timeout`; `402`, or `429` with `insufficient_quota` / billing wording → `quota`, any other `429` → `rate_limit` (honours `retry-after`, `retry-after-ms`); out-of-memory wording from a local server → `server` ("The model does not fit in this computer's memory"); `529` → `overloaded`; other `5xx` → `server`; other `4xx` → `bad_request`; a refusal to connect or DNS failure → `network`; an empty successful stream → `empty`; `content_filter` with no text → `blocked`.
+* **`listModels`:** `GET ${base}/models`, ids sorted naturally (not Ollama's newest-first order); `{data}`, `{models}` and bare arrays are understood; a `.gguf` path id (llama.cpp) is labelled with its file name.
+* **`test`:** one tiny streamed request (16 tokens, "Reply with the single word: OK"); succeeds on any 2xx that answered like an API even if the sample is empty (reasoning models).
+* **Ollama helpers.** `isOllama()` = `GET {root}/api/version` returns `{version}`; `pullModel()` = `POST {root}/api/pull` (NDJSON). Errors are mapped to plain words: registry unreachable (`network`), unknown model (`model_not_found`), disk full or Ollama too old (`server`). Model names must match `[\w.:/@+-]{1,200}` without `..`.
 
 ### Gemini adapter (native REST)
-* `POST {base}/v1beta/models/{model}:streamGenerateContent?alt=sse`, header `x-goog-api-key` (never `?key=`).
-  Model ids: strip a leading `models/`, `encodeURIComponent` the rest.
-* Body: `{ systemInstruction: { parts: [{text}] }, contents: [{ role: 'user'|'model', parts: [{text}] }], generationConfig: { temperature, maxOutputTokens, thinkingConfig? } }`.
-  Drop empty-content messages; merge consecutive same-role turns; a leading `model` turn is sent as is (verified accepted). System messages are joined into `systemInstruction`.
-  If the last remaining turn is a `model` turn → throw `bad_request` ("nothing to reply to") without calling the API.
-* **Thinking** (`cfg.thinking`, see the live-verified corrections at the top of this file): `"auto"` (default) sends no `thinkingConfig` and uses
-  `maxOutputTokens = maxTokens + 2048` (≤ 8192) so thoughts cannot starve the answer; `"low"` sends `thinkingConfig: { thinkingLevel: "low" }` with a one-time
-  fallback (drop it and remember per model) if the API answers 400 mentioning `thinking`. Never send `thinkingBudget: 0` or `thinkingLevel: "minimal"`.
-  Parts with `thought: true` are never emitted.
-* Parse SSE `data:` JSON chunks: text from `candidates[0].content.parts[].text`; `finishReason`; `usageMetadata`.
-  `promptFeedback.blockReason` or `finishReason ∈ {SAFETY, PROHIBITED_CONTENT, BLOCKLIST, SPII, IMAGE_SAFETY}` with no text → `blocked`
-  ("Gemini declined to answer this one — journaling about hard things can trip safety filters; rephrase or switch provider").
-  `MAX_TOKENS` with no text → `empty` (hint: thinking consumed the budget).
-* Errors arrive as `{ error: { code, status, message, details: [{ '@type': '…ErrorInfo', reason }, { '@type': '…RetryInfo', retryDelay: '12s' }] } }`.
-  Mapping — **invalid key is HTTP 400 with `reason: API_KEY_INVALID`** and **a missing key is HTTP 403 `PERMISSION_DENIED` "Method doesn't allow unregistered callers"** (both verified live; both → `auth`, the second with hint "no API key was sent"). Header `x-goog-api-key` is confirmed to be honoured; `UNAUTHENTICATED`/`PERMISSION_DENIED` → `auth`;
-  `RESOURCE_EXHAUSTED`/429 → `rate_limit` (parse `retryDelay`; message containing `per day`/`quota exceeded` for daily → `quota`);
-  `NOT_FOUND` → `model_not_found` (hint: open Settings → *Load models*); `FAILED_PRECONDITION` with "location" → `region`;
-  `UNAVAILABLE`/503 → `overloaded`; other 400 → `bad_request` with Google's message.
-* `listModels`: `GET {base}/v1beta/models?pageSize=1000` (follow `nextPageToken`, ≤5 pages); apply the **allow-list + exclusion** rule from the live-verified
-  corrections (item 4) and require `generateContent` in `supportedGenerationMethods` (keep the entry if the field is absent); strip `models/`; label = `displayName || id`;
-  sort: `*-latest` aliases first, then ids descending. The list may include retired models that 404 — that is handled at request time (`model_not_found`).
-* `test`: tiny request via `generateContent`-compatible stream; same success rule as OpenAI.
-* Free-tier privacy note shown in UI: *prompts and responses on the free tier may be used by Google to improve its products
-  (and reviewed by humans); billing-enabled projects are not.* Don't journal secrets with the free tier.
+
+* **Request.** `POST {base}/v1beta/models/{model}:streamGenerateContent?alt=sse`, header `x-goog-api-key` (never `?key=`; the header is confirmed honoured). A `/v1beta` or `/v1` suffix on the base URL is stripped. Model ids lose a leading `models/` and are URL-encoded.
+* **Body.** `{ systemInstruction: { parts: [{text}] }, contents: [{ role: 'user'|'model', parts: [{text}] }], generationConfig: { temperature, maxOutputTokens, thinkingConfig? } }`. System messages are joined into `systemInstruction` (folded into the first user turn for a model that rejects it). Empty messages are dropped and consecutive same-role turns merged.
+* **Turn rules (live-verified).** A conversation may **start** with a `model` turn (a guided journal's opening): it is sent as is. One that **ends** with a model turn is rejected by Google (`400 "Requests ending with a model turn are not supported."`), and an empty text part gives `400 "Request has empty input."`. So the adapter drops empty messages and, when the last remaining turn is a model turn or nothing is left, throws `bad_request` ("There is nothing to reply to yet.") without calling the API.
+* **Thinking (live-verified).** `cfg.thinking` is `"auto"` (default) or `"low"`. `auto` sends **no** `thinkingConfig`. Because thought tokens count against `maxOutputTokens` (observed: 189 of 200 tokens spent thinking, reply cut off with `finishReason: MAX_TOKENS`), every request sends `maxOutputTokens = requestedMaxTokens + 2048` (at most 8192); reply length is steered by the prompt, not the cap. `low` sends `thinkingConfig: { thinkingLevel: "low" }` (accepted by 3.x models); a `400` mentioning thinking (or the bare "Request contains an invalid argument.") retries once without it and remembers that per model while the process runs. **Never** sent: `thinkingBudget: 0` (rejected by 3.x lite) and `thinkingLevel: "minimal"` (rejected by `gemini-3.8-flash`). Parts with `thought: true` are never emitted.
+* **Reading the answer.** SSE frames are `data: {json}\r\n\r\n`; short answers arrive in 2–5 frames, the last carrying `finishReason` and `usageMetadata` (`thoughtsTokenCount` only when it thought), so streaming a journal-length reply arrives in few large chunks and the UI must look good regardless. Text is `candidates[0].content.parts[].text`. `promptFeedback.blockReason` or `finishReason ∈ {SAFETY, PROHIBITED_CONTENT, BLOCKLIST, SPII, IMAGE_SAFETY, RECITATION}` with no text → `blocked`; `MAX_TOKENS` with no text → `empty` (hint: thinking used the budget).
+* **Error mapping.** Errors arrive as `{ error: { code, status, message, details: [ErrorInfo{reason}, RetryInfo{retryDelay}, QuotaFailure{violations}] } }`. Every error on the streaming method other than the two key errors comes back as `text/event-stream` with a plain JSON body; a bare `[{error}]` array is understood. Live-verified: an **invalid key is HTTP 400 `API_KEY_INVALID`**, a **missing key is HTTP 403 `PERMISSION_DENIED` "Method doesn't allow unregistered callers"** (both → `auth`, the second with the hint "no API key was sent"); unknown model `404 NOT_FOUND` and retired model `404 "…is no longer available to new users. Please update your code to use models/gemini-3.8-flash…"` (both → `model_not_found`, the second quoting Google's suggestion); overload `503 UNAVAILABLE` "currently experiencing high demand" → `overloaded` (hint: switch to `gemini-flash-lite-latest` in Settings, or just try again when already on a Lite model). From Google's documented format, not provoked live: `RESOURCE_EXHAUSTED`/`429` → `rate_limit` (waits `retryDelay`) or, for a per-day quota or `limit: 0`, `quota`; `FAILED_PRECONDITION` about location → `region`; restricted or disabled keys → `auth`; token-count wording → `context_too_long`; other `400` → `bad_request` with Google's message.
+* **`listModels`.** `GET {base}/v1beta/models?pageSize=1000`, following `nextPageToken` (≤ 5 pages). Live: the field is `supportedGenerationMethods`, 62 entries on one page; the list holds many non-chat ids (`lyria-*`, `deep-research-*`, `*-tts`, `*-image*`, `nano-banana*`, transcribe, omni, robotics, computer-use, customtools, embeddings, imagen, veo, …) **and retired chat models that answer 404**. So the adapter keeps ids matching `^(gemini|gemma)-`, drops ids matching `/embed|aqa|imagen|veo|tts|image|banana|live|audio|transcribe|omni|robotics|computer-use|customtools|learnlm|lyria/`, requires `generateContent` (entries without the field are kept), strips `models/`, labels with `displayName || id`, and sorts `*-latest` aliases first, then newest first, with Gemma models last. Retired models still in the list are handled at request time.
+* **`test`:** as for OpenAI-compatible.
+* **Free tier note** (shown in the UI): prompts and responses on the free tier may be used by Google to improve its products and reviewed by humans; billing-enabled projects are not. Do not journal secrets with it.
+
+**Live-verified facts (2026-10-08, free-tier key; raw responses in `test/fixtures/gemini-live/`).** Numbering is cited from source comments.
+1. **Default model `gemini-flash-lite-latest`** (currently → `gemini-3.5-flash-lite`: about 1 s to the first byte, does not think by default, best free quota). `gemini-flash-latest` (→ `gemini-3.8-flash`) is "smarter but slower/busier": first bytes after 16–23 s, `503 "high demand"` and timeouts under load. Suggested in the catalog: `gemini-flash-lite-latest` ("Fast — recommended"), `gemini-flash-latest` ("Smarter, can be slow or busy"), `gemini-3.5-flash-lite`, `gemini-3.5-flash`.
+2. **Thinking:** `auto` (default) / `low`, as above; never `thinkingBudget: 0` or `minimal`.
+3. **Turn rules:** may start with a model turn; must not end with one; no empty text.
+4. **`models.list`:** allow-list `^(gemini|gemma)-` minus the non-chat families, as above; `gemma-4-*` works with `systemInstruction`, reasons by default and rejects any `thinkingLevel`.
+5. **Error codes seen:** bad key `400 API_KEY_INVALID`; no key `403 PERMISSION_DENIED`; unknown and retired model `404 NOT_FOUND`; overload `503 UNAVAILABLE`. A `429` could not be provoked.
+6. **Streaming shape:** `data: {json}\r\n\r\n` frames, few big chunks.
 
 ### Catalog copy (`describeProviders`)
-* gemini — "Free Gemini API": tagline "Free key from Google AI Studio", `keyUrl: https://aistudio.google.com/apikey`, suggested models
-  `gemini-flash-lite-latest` ("Fast — recommended"), `gemini-flash-latest` ("Smarter, can be slow or busy"), `gemini-3.5-flash-lite`, `gemini-3.5-flash`; privacyNote above.
-* openai — "OpenAI-compatible API": tagline "OpenAI, OpenRouter, Groq, Together, DeepSeek, …"; suggested `gpt-4o-mini`; presets for base URLs
-  (OpenAI, OpenRouter `https://openrouter.ai/api/v1`, Groq `https://api.groq.com/openai/v1`, Together `https://api.together.xyz/v1`).
-* local — "Self-hosted small LLM": tagline "Runs on your machine — nothing leaves it"; presets Ollama `http://localhost:11434/v1`, llama.cpp `http://localhost:8080/v1`,
-  LM Studio `http://localhost:1234/v1`; suggested models `llama3.2:1b` (~1.3 GB, plumbing tests), `qwen2.5:1.5b`, `gemma2:2b`, `llama3.2:3b` (better quality), `smollm2:1.7b`.
+* gemini: "Free Gemini API", tagline "Free key from Google AI Studio", `keyUrl: https://aistudio.google.com/apikey`, the suggested models above, the privacy note above, no presets.
+* openai: "OpenAI-compatible API", tagline "OpenAI, OpenRouter, Groq, Together, DeepSeek, …"; suggested `gpt-4o-mini`; presets OpenAI `https://api.openai.com/v1`, OpenRouter `https://openrouter.ai/api/v1`, Groq `https://api.groq.com/openai/v1`, Together `https://api.together.xyz/v1`.
+* local: "Self-hosted small LLM", tagline "Runs on your machine — nothing leaves it"; presets Ollama `http://localhost:11434/v1`, llama.cpp `http://localhost:8080/v1`, LM Studio `http://localhost:1234/v1`; suggested `llama3.2:1b` (~1.3 GB, plumbing tests), `qwen2.5:1.5b`, `gemma2:2b`, `llama3.2:3b` (better quality), `smollm2:1.7b`.
 
----------------------------------------------------------------------------------------------------
+---
 
 ## 10. Server (`src/server/*`)
 
-* `createApp({ config, db, fetch? }) -> { server, listen(), close() }` — no global state, so tests spin up many instances on port 0.
-* Router: tiny pattern router in `http.js` (`/entries/:id/messages/:mid`), JSON body reader with size cap (1 MB default, 50 MB for import),
-  `sendJson/sendError/sendNoContent`, `openSse(res) -> { send(event,data), close() }`.
-* **Security** (`security.js`), applied before routing:
-  1. `Host` header allow-list: `localhost`, `127.0.0.1`, `[::1]` (any port) + `config.allowedHosts` — enforced when no password is set (DNS-rebinding defence) → `403 forbidden_host`.
-  2. For non-GET `/api` requests: require `X-MyJournal: 1` and, if an `Origin` header is present, its host must equal `Host` → else `403 forbidden_origin`. No CORS headers are ever sent.
-  3. Headers on everything: `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, `Permissions-Policy: microphone=(self), camera=(), geolocation=()`; `/api/*` also `Cache-Control: no-store`.
-  4. Startup refuses a non-loopback `HOST` without `JOURNAL_PASSWORD` unless `JOURNAL_INSECURE_ALLOW_NO_AUTH=1`.
-* **Auth** (`auth.js`): password compared with `crypto.timingSafeEqual` over SHA-256 digests; session token = random 32 bytes stored server-side in a Map (TTL 30 days); cookie `mj_session` HttpOnly, SameSite=Strict, Path=/, `Secure` only when `X-Forwarded-Proto: https`.
-* **Static** (`static.js`): serves `public/`, `index.html` for unknown non-`/api` paths without extension (SPA), strict path-traversal protection (resolve + prefix check, reject `..`, NUL, backslashes), correct MIME types, `Cache-Control: no-cache`.
-* **AI service** (`ai-service.js`): `getProvider(settings, env)` → `{ provider, cfg }` or throws `ai_not_configured` / `ai_disabled`; wraps `createProvider(resolveProviderConfig(...))`.
-* **Generation** (`generation.js`): per-entry lock, abort wiring (`res.on('close')` while not finished ⇒ abort), partial persistence, SSE error mapping.
-* Logging: one line per request (`method path status ms`), never bodies/headers/keys. Quiet in tests (`config.quiet`).
-* Graceful shutdown on SIGINT/SIGTERM (stop accepting, abort generations, close DB).
+* `createApp({ config, db, fetch? }) -> { server, auth, generations, db, url, port, listen(), close() }`. No global state, so tests start many instances on port 0. `listen()` resolves `{ port, host, url }` and rejects with a `ListenError` that has a hint (`EADDRINUSE`, `EACCES`, `EADDRNOTAVAIL`); `close()` stops accepting, aborts running generations (their partial replies are saved), closes idle connections and, after a 2 s grace period, all of them.
+* **Request pipeline** (`app.js`), for every request:
+  1. security headers on the response; the target must be a plain path (`400 bad_request` otherwise);
+  2. `Cache-Control: no-store` on `/api/*`;
+  3. the **Host allow-list** (`security.hostCheckEnabled`, below);
+  4. for `/api/*`: the **CSRF check**, then `handleApi`: **auth** (`401`) → route match (`404`, `405`) → handler. Static paths: `static.js`.
+  Errors thrown anywhere become `{ error }` bodies; anything that is not an `HttpError` or a known `DbError` is logged to the terminal and answered as `500 internal_error`. A body that was not read forces `Connection: close`.
+* **Security (`security.js`).**
+  1. *Response headers on everything:* `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin`, `Permissions-Policy: microphone=(self), camera=(), geolocation=()`, `X-Frame-Options: DENY`; `/api/*` also `Cache-Control: no-store`. No CORS header is ever sent.
+  2. *Host allow-list* (DNS-rebinding defence): `localhost`, `127.0.0.1`, `[::1]` (any port), the address given as `HOST` (unless it is a wildcard such as `0.0.0.0`) and the `JOURNAL_ALLOWED_HOSTS` entries (a bare name allows any port, `name:port` only that port). It is **enforced whenever no password is set, and also when a password is set but the server listens on a loopback address** (a web page that rebinds its own domain to 127.0.0.1 would otherwise only have the password in its way). It is **off only for a non-loopback bind with a password**, where the password is the protection and the server cannot know its public names. A violation is `403 forbidden_host`.
+  3. *CSRF:* a non-`GET`/`HEAD`/`OPTIONS` `/api` request needs `X-MyJournal: 1`; if an `Origin` header is present its scheme/host/port must equal the `Host` header (or the first `X-Forwarded-Host`, for proxies that rewrite `Host`); `Sec-Fetch-Site: cross-site` is refused. Failures are `403 forbidden_origin`.
+  4. *Startup rule:* a non-loopback `HOST` without `JOURNAL_PASSWORD` is refused unless `JOURNAL_INSECURE_ALLOW_NO_AUTH` is set. The refusal prints the reason and exits with status 1.
+* **Auth (`auth.js`).** The password is compared as SHA-256 digests with `crypto.timingSafeEqual` (≤ 4096 characters). A session is 32 random bytes (base64url) held in memory as a hash with a 30-day expiry (at most 1000 live sessions, oldest dropped first); a restart signs everyone out. Cookie `mj_session_<port>`: HttpOnly, SameSite=Strict, Path=/, Max-Age 30 days, `Secure` only when the request came with `X-Forwarded-Proto: https`. A new login replaces the old session. Failed logins: sliding window of 5 per 60 s per client address, taken from the socket (`::ffff:a.b.c.d` and `a.b.c.d` are the same client); `X-Forwarded-For` is not consulted, so behind a reverse proxy all visitors share one counter (verified).
+* **Static files (`static.js`).** Serves `public/`; an extension-less path that matches no file gets `index.html` (single-page app), an unknown path with an extension is `404`. One round of percent-decoding, then segments must be plain: no `..`, `.`, empty segments, backslashes, NUL/control characters or `:`; dot files are `404`; the resolved real path must stay inside `public/`. Correct MIME types, `Cache-Control: no-cache` with `ETag` / `Last-Modified` (`304` supported). Only `GET`/`HEAD` (`405` otherwise).
+* **AI service (`ai-service.js`).** `getProvider(settings, env)` → `{ provider, cfg }` or `409 ai_disabled` / `409 ai_not_configured`; `buildWithOverlay` for tests without saving. `providerRows` adds `configured` and the effective `keySource` to the catalog.
+* **Generation (`generation.js`).** Per-key locks (§7), abort wiring (`res.on('close')` while the response is unfinished aborts the job), partial persistence, SSE error mapping. The preconditions run in the order given in §6.
+* **Request log.** One line per request: `METHOD /path status ms`, path only (no query string, so search words are not logged), printable ASCII only, never bodies, headers or keys; quiet in tests (`config.quiet`). Warnings and errors go to stderr; `unhandledRejection` is logged and does not stop the process; writes to a closed pipe (`npm start | head`) are ignored.
+* **Start-up and shutdown (`server.js`).** Order: load `.env` (warn if unreadable) → `loadConfig` → startup rule → install `SIGINT`/`SIGTERM` handlers → open the database (friendly messages for a folder that cannot be created/written, a read-only file, or a database from a newer build) → listen → print the banner (address, data file, which AI is ready, a password and exposure warning when not on loopback). A signal stops accepting, aborts generations, closes the database (`PRAGMA optimize`, WAL checkpoint, index purge) and exits 0; a second signal forces exit 1.
 
----------------------------------------------------------------------------------------------------
+---
 
-## 11. DB layer API (`src/db/index.js`)
+## 11. Database layer (`src/db/index.js`)
 
 ```js
-openDb({ file }) -> db            // file: path or ':memory:'; creates dir (0700) and file (0600); runs migrations
-db.entries.create(fields) / get(id) / list({limit,before,mood,tag,from,to,pinned,includePrivate=true}) / update(id, patch) / delete(id)
-db.entries.rowsForInsights({ from, to, includePrivate }) -> [{id,date,mood,emotions,tags,wordCount,status,private,title,summary,createdAt}]
-db.messages.add(entryId, { role, content, meta, createdAt? }) -> Message   // assigns seq, updates entry word_count/updated_at/search index, in a transaction
-db.messages.list(entryId) / get(id) / update(id, {content, meta}) / delete(id) / deleteLast(entryId) / last(entryId)
-db.memories.list() / create({text,pinned,sourceEntryId}) / update(id,patch) / delete(id) / clear() / exists(text)  // exists: case/space-insensitive
-db.reports.list() / create(...) / delete(id)
+openDb({ file }) -> db            // file: path or ':memory:'. Creates the directory (0700) and file (0600) itself, enables WAL, secure_delete, foreign keys; runs migrations; refuses a read-only file ("is read-only, so nothing could be saved") and a newer schema
+db.entries.create(fields) / get(id) / exists(id) / update(id, patch) / delete(id) / count()
+db.entries.list({ limit, before, beforeId, mood, tag, from, to, pinned, includePrivate = true }) -> EntrySummary[]   // exactly `limit` rows
+db.entries.page(sameOptions) -> { entries, nextBefore, nextBeforeId, nextCursor }   // never splits a run of entries with the same createdAt: the page grows (≤ 500 extra rows) instead
+db.entries.summariesFor(ids) / rowsForInsights({ from, to, includePrivate }) -> [{ id, date, mood, emotions, tags, wordCount, status, private, title, summary, createdAt }]
+db.messages.add(entryId, { role, content, meta, createdAt? }) -> Message   // assigns seq; updates the entry's word count, updatedAt and search index in one transaction
+db.messages.list(entryId) / get(id) / last(entryId) / update(id, { content, meta }) / delete(id) / deleteLast(entryId)
+db.memories.list() / get(id) / create({ text, pinned, sourceEntryId }) / update(id, patch) / delete(id) / clear() / exists(text)   // exists: case- and space-insensitive
+db.reports.list() / get(id) / create(…) / delete(id)
 db.settings.get() -> internal settings (defaults merged) / set(settings)
-db.search(queryText, { limit=20, excludeEntryId, includePrivate=false, mode: 'all'|'any' }) -> [{ entryId, rank, snippet }]
-db.exportAll() / db.importAll(json) -> counts / db.wipe({ includeSettings }) / db.stats() / db.close()
+db.search(queryText, { limit = 20 (≤ 100), excludeEntryId, includePrivate = false, mode: 'all'|'any', mood, tag, from, to, pinned }) -> [{ entryId, rank, snippet }]
+db.exportAll() / db.importAll(json) -> { imported, skipped } / db.wipe({ includeSettings }) / db.stats() / db.tx(fn) / db.close()
 ```
-`mode: 'all'` = every token prefix-matched (UI search); `'any'` = OR of tokens ranked by bm25 (related-entry recall). Queries
-are **always sanitised** into a safe FTS5 expression (quote every token) — raw user input never reaches `MATCH`.
 
-`src/settings.js` exports `DEFAULT_SETTINGS`, `normalizeSettings(input)`, `mergeSettings(current, patch) -> { settings, errors }`,
-`publicSettings(settings, env)`, `isProviderConfigured(settings, env)`, `PROVIDER_IDS`.
+`page()` is what the HTTP list uses (and the route finishes any tie run longer than 500 itself); `list()` is exact. `mode: 'all'` prefix-matches every token (UI search); `'any'` is an OR ranked by bm25 (related-entry recall). Queries are **always sanitised** into a safe FTS5 expression (every token quoted); raw user input never reaches `MATCH`. Runs of CJK/Thai text and emoji also get a substring search, because the tokenizer treats a run as one word. Deleted text does not linger: `secure_delete`, an index purge on wipe and at clean shutdown, and `VACUUM` on wipe. Import treats the file as hostile (field-by-field validation, unknown and prototype-pollution keys dropped, counts in the file ignored). Closing runs housekeeping with a short busy timeout, so it can never hang behind another connection.
 
----------------------------------------------------------------------------------------------------
+`src/settings.js` exports `DEFAULT_SETTINGS`, `SETTINGS_LIMITS`, `normalizeSettings(input)` (never throws), `mergeSettings(current, patch) -> { settings, errors }`, `publicSettings(settings, env)`, `isProviderConfigured(settings, env, providerId?)`, `applyEnvSeed(settings, env)`, `PROVIDER_IDS`, `PERSONA_IDS`, `THINKING_MODES`.
 
-## 12. Frontend architecture
+---
 
-### Shared core (already written — read these files, do not edit)
-* `public/js/lib/dom.js` — `h(tag, props?, ...children)`, `s()` (SVG), `clear`, `mount`, `$`, `$$`. `props`: `class` (string|array|object), `on<Event>`, `dataset`, `style` (object), `ref(fn)`, `aria-*`/`data-*`/any attribute; `value`/`checked`/`disabled`/`selected`/`hidden`/`textContent` as properties. **No HTML strings.**
-* `public/js/lib/api.js` — `api.get/post/put/patch/del(path, body?, {signal})` (paths relative to `/api`), `api.stream(path, body, {signal, onEvent(name, data)})`, `api.download(path, filename)`, `ApiError {status, code, message, hint, fields}`.
-* `public/js/lib/router.js` + `public/js/app.js` — hash router; each view is `export default async function view(ctx)` returning an optional cleanup function.
-  `ctx = { root, params, query (URLSearchParams), signal (aborts on navigation), app }`.
-  `app = { settings, refreshSettings(), saveSettings(patch), navigate(path), toast(msg, opts), on(event, fn), catalog() }`.
-* `public/js/lib/markdown.js` — `renderMarkdown(text) -> DocumentFragment`, `renderInline(text) -> Node[]`, pure `parseMarkdown/parseInline` (no HTML ever; links become plain text). Use it for every AI-authored text.
-* `public/js/lib/ui.js` — `moodPicker`, `skeleton`, `showError`, `addDays`, `parseDate`, `formatMonth`, `greeting`, `ICON_NAMES`, plus `toast`, `confirmDialog`, `openModal`, `icon(name, {size})`, `spinner`, `emptyState`, `MOODS`, `moodFace`, `debounce`, `autosize`, `formatDate`, `formatTime`, `relativeTime`, `copyText`, `todayString`.
-* `public/css/base.css` — design tokens (light/dark), reset, layout shell, buttons, forms, cards, chips, dialog, toast, skeleton.
+## 12. Frontend
 
-### Frontend file ownership details
-Two frontend agents work in parallel. **Frontend-A** owns `views/{today,entry,history}.js`, `css/{today,entry,history}.css`,
-`lib/voice.js`. **Frontend-B** owns `views/{settings,insights,memory,onboarding,login}.js`,
-`css/{settings,insights,memory,onboarding,login}.css`, `lib/charts.js`. Shared components go in `js/components/` and are named
-`<owner-view>-<thing>.js` (e.g. `entry-message.js`, `settings-provider-form.js`); never import another agent's view or component —
-if you need something shared, put it in your own file. Views may import `lib/*.js` freely (including the other agent's lib files
-*after* they exist; if unsure, copy the 5 lines you need). Pure logic (markdown parsing, chart math) lives in functions that take
-plain data so it can be unit-tested in Node (`test/frontend/*.test.js`; modules must not touch `document` at import time).
+### Shared core (`public/js/lib`)
+* `dom.js`: `h(tag, props?, ...children)`, `s()` (SVG), `clear`, `mount`, `frag`, `$`, `$$`. `props`: `class` (string, array or object), `on<Event>`, `dataset`, `style` (object), `ref(fn)`, `aria-*` / `data-*` / any attribute; `value`, `checked`, `disabled`, `selected`, `hidden`, `textContent` as properties. **No HTML strings.**
+* `api.js`: `api.get/post/put/patch/del(path, body?, {signal})` (paths relative to `/api`), `api.stream(path, body, {signal, onEvent(name, data)})`, `api.download(path, filename)`, `ApiError {status, code, message, hint, fields}`; adds the `X-MyJournal` header; reports whether the server is reachable.
+* `router.js` and `app.js`: a hash router; each view is `export default async function view(ctx)` returning an optional cleanup function. `ctx = { root, params, query (URLSearchParams), signal (aborts on navigation), app }`. `app = { settings, refreshSettings(), saveSettings(patch), navigate(path), toast(msg, opts), on(event, fn), catalog(), aiReady() }`. The shell holds the sidebar / bottom tab bar, the "AI" pill, the theme switch (`localStorage` key `mj-theme`, applied early by `theme-init.js`), a connection banner that probes `/api/health` when requests fail, and the sign-in gate (a `401` sends the person to `#/login` and back).
+* `markdown.js`: `renderMarkdown(text) -> DocumentFragment`, `renderInline`, pure `parseMarkdown` / `parseInline` (no HTML ever; links become plain text). Used for every AI-authored text.
+* `ui.js`: `moodPicker`, `skeleton`, `showError`, date helpers, `ICON_NAMES`, `toast`, `confirmDialog`, `openModal`, `icon`, `spinner`, `emptyState`, `MOODS`, `debounce`, `autosize`, `copyText`, `todayString`, …
+* `charts.js` (SVG charts with accessible titles and table fallbacks), `voice.js` (Web Speech API wrapper; feature-detected; the browser, not the app, recognises speech).
+* `css/base.css`: design tokens (light and dark), reset, layout shell, buttons, forms, cards, chips, dialog, toast, skeleton. Each view has its own stylesheet.
+
+Components are named `<view>-<thing>.js` (for example `entry-message.js`, `settings-provider-form.js`); a view never imports another view. Pure logic (markdown parsing, chart maths, stream reveal, settings helpers) takes plain data and is unit-tested in Node (`test/frontend`); such modules must not touch `document` at import time.
 
 ### Routes
-`#/` Today · `#/welcome` onboarding · `#/entry/:id` (`?reply=1` auto-requests an AI reply for a trailing user message) · `#/history` ·
-`#/insights` · `#/memory` · `#/settings` (`?tab=gemini|openai|local|general|data`) · `#/login`.
+`#/` Today · `#/welcome` onboarding · `#/entry/:id` (`?reply=1` auto-requests a reply for a trailing user message) · `#/history` · `#/insights` · `#/memory` · `#/settings` (`?tab=gemini|openai|local|general|data`, `&setup=1` after onboarding) · `#/login`.
 
-### Views and what they must do
-* **Today** (`views/today.js`): greeting + streak chip; big composer ("What's on your mind?") with mood chips and **Start journaling** (creates entry with `content`, navigates to `#/entry/:id?reply=1`; if AI isn't configured, saves and navigates without `reply`); *prompt of the day* card (click → guided entry); guided journal grid grouped by category (click → `POST /entries {templateId}` → open); recent entries (5) + pinned; weekly-reflection nudge. Keyboard: Ctrl/⌘+Enter submits.
-* **Entry** (`views/entry.js`): chat-style column (journal text in serif bubbles, AI replies with a calm accent); editable title, date, mood picker, emotion/tag chips (editable), overflow menu (private toggle, pin, export .md, delete). Composer: autosizing textarea, **Send** (= `POST messages` then `POST reply` SSE streaming into a live bubble with caret), **Save without reply**, **Stop** while streaming, **Wrap up** (SSE wrap-up with phase labels; shows summary + new memories), regenerate last reply, edit/delete own messages, voice dictation (Web Speech API, feature-detected). Inline error banners with provider error `hint` and a *Retry* + *Open settings* action; "AI isn't set up" banner when `ai_not_configured`. `aria-live="polite"` on the streaming bubble. Safety notice renders as a distinct, gentle card. Must never lose typed text on failure.
-* **History** (`views/history.js`): debounced search (FTS, highlighted terms via DOM—not HTML), filters (mood, tag, pinned), month-grouped list, "Load more".
-* **Insights** (`views/insights.js`): stat cards; mood line chart (SVG, accessible: `<title>`, table fallback); 90-day calendar heatmap; top emotions/tags bars; **Weekly reflection** generate (SSE stream) + past reports.
-* **Memory** (`views/memory.js`): explanation + master toggles (`memory.enabled`, `autoExtract`, `useRelatedEntries`); list with inline edit, pin, delete, add, "clear all"; link to source entry.
-* **Settings** (`views/settings.js`): tabs *Gemini (free)* / *OpenAI-compatible* / *Local model* / *General* / *Data*. Provider tab: key field (masked, show `apiKeyHint`/source), base URL (+ preset buttons), model combobox with **Load models**, **Test connection** (shows latency/sample or error + hint), **Use this provider** (sets `ai.provider`), privacy note. Local tab adds Ollama quick-start (copy-able commands), small-model suggestions, **Download model** with progress (SSE). General: your name, about, persona (cards + custom), temperature, max tokens, context budget, timeout, AI on/off, theme. Data: stats, export JSON/Markdown, import, wipe (typed confirmation).
-* **Onboarding** (`views/onboarding.js`): three provider cards (Free Gemini · OpenAI-compatible · Local small model) + "Just journal, no AI"; sets `onboarded`.
-* **Login** (`views/login.js`).
+### Views
+* **Today:** greeting and streak chip; the big composer ("What's on your mind?") with mood chips and **Start journaling** (creates the entry with `content`, then opens `#/entry/:id?reply=1`; with no AI it saves and opens without `reply`); the *prompt of the day*; the guided journal grid by category; recent and pinned entries; a weekly-reflection nudge. Ctrl/⌘+Enter submits.
+* **Entry:** a chat-style column (the person's text in serif bubbles, replies with a calm accent); editable title, date, mood, emotion and tag chips; a menu (private, pin, export `.md`, delete). Composer: autosizing textarea, **Send** (`POST messages`, then `POST reply` streaming into a live bubble), **Save without reply**, **Stop**, **Wrap up** (phase labels, then summary and new memories), regenerate, copy, edit or delete messages, **Dictate**, drafts saved to local storage. Inline error banners with the provider's `hint`, **Try again** and **Open settings**; an "AI isn't set up" banner; the safety card is a distinct gentle block. Typed text is never lost on failure. `aria-live="polite"` on the streaming bubble.
+* **History:** debounced full-text search with highlighted terms (DOM, not HTML), filters for mood, tag and pinned, month groups, *Load more*.
+* **Insights:** stat cards, the mood line chart, the 90-day calendar heatmap, top emotions and tags, **Weekly reflection** (7, 14 or 30 days, streamed) and past reports.
+* **Memory:** explanation, the three switches (`memory.enabled`, `autoExtract`, `useRelatedEntries`), list with inline edit, pin, delete, add, *Clear all*, link to the source entry.
+* **Settings:** tabs *Gemini (free)* · *OpenAI-compatible* · *Local model* · *General* · *Data*. A provider tab has a masked key field (showing `apiKeyHint` and source), the base URL with preset buttons, a model combobox with **Load models**, **Test connection** (sends the unsaved form as an overlay), **Save**, **Use this provider** and the privacy note. The Local tab adds the Ollama quick start with copyable commands, the small-model picker, and **Download model** with a cancellable progress bar, and warns when the address is not on this computer. *General:* name, about you, persona cards and custom text, creativity, reply length, context budget, timeout, AI on/off, theme. *Data:* stats, export JSON / Markdown, import, where the data lives, sign out (when a password is set), delete everything (typed confirmation).
+* **Onboarding:** three provider cards (Free Gemini · OpenAI-compatible · Local small model) and **Just journal, no AI**; sets `onboarded`.
+* **Login:** the password form; shown by the shell when `/api/auth/status` says sign-in is required.
 
 ### UX bar
-Calm, warm, uncluttered; serif for journal text, system sans for UI; keyboard-first; visible focus; `prefers-reduced-motion` respected;
-WCAG AA contrast; works at 360 px wide (bottom tab bar on mobile, sidebar on ≥ 900 px); skeleton loaders, never blank screens; every
-async button has loading + disabled states; every error is human-readable with a next step.
+Calm, warm, uncluttered; serif for the person's text, system sans for the UI; keyboard-first with visible focus; `prefers-reduced-motion` respected; WCAG AA contrast; works at 360 px wide (bottom tab bar on phones, sidebar from 900 px); skeleton loaders, never blank screens; every async button has loading and disabled states; every error is human-readable with a next step.
 
----------------------------------------------------------------------------------------------------
+---
 
-## 13. Testing strategy
+## 13. Testing
 
-* `node --test`, files `test/**/*.test.js`; each module has unit tests next to its mirror dir under `test/`.
-* **Mock LLM servers** (`test/mocks/`, owned by the providers agent, reused by server + e2e tests):
-  * `mock-openai.js` — `createMockOpenAI({ replies?, delayMs?, failures? })` → `{ url, close(), requests[] }`; implements `GET /v1/models`, `POST /v1/chat/completions` (SSE chunked **realistically**: role-only first delta, content deltas split mid-word/mid-UTF-8, `finish_reason` chunk, usage chunk, `[DONE]`; non-stream JSON mode), optional `<think>` blocks, error injection (401, 404 model, 429 with `retry-after`, 400 on `max_tokens`/`temperature`/`stream_options`, 500, hang, malformed chunk), plus Ollama endpoints `GET /api/version`, `POST /api/pull` (NDJSON progress).
-  * `mock-gemini.js` — `createMockGemini({...})`: `GET /v1beta/models`, `POST /v1beta/models/:m:streamGenerateContent?alt=sse` and `:generateContent`, validates `x-goog-api-key`, alternation of roles, returns Google-style error JSON (invalid key = 400 `API_KEY_INVALID`, 429 with `RetryInfo`, 404, 503, safety block).
-  * Replies are deterministic and *role-aware*: the mock inspects the prompt to answer title/summary/memory/wrap-up requests in the labelled-line formats of §8 so end-to-end flows are testable.
-  * `serve.js` — CLI that starts both mocks (ports 11500/11501) for manual UI trials (`npm run mock-llm`).
-* Server integration tests boot the real app on port 0 with a temp dir and the mocks.
-* E2E (`test/e2e/*.e2e.js`): Playwright (`playwright-core`, Chromium at `$PLAYWRIGHT_BROWSERS_PATH` / `/opt/pw-browsers`), skipped
-  gracefully when unavailable.
-* A real small model smoke test is documented in `docs/PROVIDERS.md` (Ollama) — cannot run in CI.
+* **Unit and integration:** `npm test` runs `node --test` over `test/{providers,db,journal,server,frontend}/**/*.test.js` with `--test-concurrency=1` (about 1,350 tests, one to two minutes). Server tests boot the real app on port 0 with a temporary data folder and the mock LLM servers; provider tests also replay the responses recorded from the real services (`test/fixtures`).
+* **Mock LLM servers** (`test/mocks`, reused by the server tests, the e2e tests, `npm run demo` and `npm run mock-llm`):
+  * `mock-openai.js`: `createMockOpenAI(options)` → `{ url, baseUrl, close(), requests[], setBehavior() }` (every option and its default is in `DEFAULTS`). `GET /v1/models`, `POST /v1/chat/completions` (SSE chunked realistically: content split mid-word and mid-UTF-8, a `finish_reason` chunk, usage, `[DONE]`; non-stream JSON mode), `<think>` and reasoning-field output, a long list of injectable failures (`failures`, `rejectParams`: 401, 404, 429 with `retry-after`, 400 on `max_tokens` / `temperature` / `stream_options`, 5xx, hang, reset, malformed chunk, …) and the Ollama endpoints `GET /api/version`, `GET /api/tags`, `POST /api/pull` (NDJSON progress, with failure modes). `flavor: 'ollama' | 'llamacpp'` imitates the real servers byte for byte where it matters (chunk shapes, error bodies, a context window `numCtx` that trims old messages like Ollama and rejects like llama.cpp), as captured in `test/fixtures`.
+  * `mock-gemini.js`: `createMockGemini(options)`: `GET /v1beta/models`, `…:streamGenerateContent?alt=sse` and `:generateContent`; validates `x-goog-api-key` and role alternation; answers with Google-shaped errors (invalid key 400 `API_KEY_INVALID`, 429 with `RetryInfo`, 404, retired models, 503 after a delay, safety block); `live: true` applies the per-family thinking rules and the real catalogue (`LIVE_MODELS`).
+  * `mock-responder.js`: the replies are deterministic and *role-aware*: the responder reads the `TASK:` line and answers title, summary, memory, wrap-up and weekly requests in the labelled-line formats of §8, so whole flows are testable offline.
+  * `serve.js`: the CLI behind `npm run mock-llm` (ports 11500 and 11501).
+* **Static checks:** `npm run check` (`scripts/check.js`): `node --check` for every `.js`/`.mjs`/`.cjs` file under `src`, `public`, `test`, `scripts` and `server.js` (with the right module type), and no `innerHTML`, `eval` and friends in `public/`.
+* **Browser e2e:** `npm run test:e2e` runs `test/e2e/*.e2e.js` in real Chromium against the real app (about 4–5 minutes); Playwright is found at run time and every test is *skipped* with a reason when it or Chromium is missing. Journeys fail on any console error or warning, CSP violation, unexpected HTTP error or request to another origin. See `test/e2e/README.md`.
+* **Real small-model smoke test:** [PROVIDERS.md](PROVIDERS.md#smoke-test-with-a-real-model). Recordings from a real Ollama 0.40.1, llama.cpp `llama-server` and the real Gemini API are in `test/fixtures` and replayed by the provider tests.

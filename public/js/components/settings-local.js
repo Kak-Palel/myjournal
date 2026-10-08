@@ -3,7 +3,7 @@
 // progress bar that can be cancelled.
 import { h, mount } from '../lib/dom.js';
 import { api, ApiError } from '../lib/api.js';
-import { icon, toast } from '../lib/ui.js';
+import { icon, toast, inlineCode } from '../lib/ui.js';
 import { ollamaCommands, describeSmallModel, pullProgress, describePullFailure } from './settings-logic.js';
 import { commandBlock, externalLink, notice, uid, handFocus } from './settings-ui.js';
 
@@ -127,7 +127,7 @@ function buildDownload(form, signal) {
     const f = describePullFailure(err);
     mount(outcome, notice({
       tone: err && err.code === 'not_ollama' ? 'warn' : 'error', role: 'alert',
-      children: [h('strong', null, f.message), h('p', { class: 'muted' }, f.hint)],
+      children: [h('strong', null, inlineCode(f.message)), h('p', { class: 'muted' }, inlineCode(f.hint))],
     }));
   }
 

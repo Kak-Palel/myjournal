@@ -46,6 +46,7 @@
 .memory-text { margin: 0 0 0.25rem; font-family: var(--font-serif); font-size: 1.075rem; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; }
 .memory-meta { margin: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem 0.75rem; font-size: 0.8125rem; }
 .memory-source { display: inline-flex; align-items: center; gap: 0.25rem; }
+@media (pointer: coarse), (max-width: 899px) { .memory-source { min-height: 44px; } }
 .memory-actions { flex: none; display: flex; align-items: center; gap: 0.1rem; }
 .memory-icon-btn { min-width: 44px; min-height: 44px; color: var(--text-muted); }
 .memory-icon-btn:hover { color: var(--text); }

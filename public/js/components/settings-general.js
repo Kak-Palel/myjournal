@@ -2,7 +2,7 @@
 // Saved through app.saveSettings(patch); server field errors (ApiError.fields) are shown next to the field.
 import { h, mount } from '../lib/dom.js';
 import { ApiError } from '../lib/api.js';
-import { icon, toast, skeleton } from '../lib/ui.js';
+import { icon, toast, skeleton, inlineCode } from '../lib/ui.js';
 import { setTheme, getTheme } from '../app.js';
 import {
   LIMITS, TEMPERATURE_STEP, clampNumber, buildGeneralPatch, mapGeneralErrors, temperatureWord, personaChoices,
@@ -185,7 +185,15 @@ export function createGeneralPanel({ app, signal, onChange }) {
     };
   }
 
-  const isDirty = () => buildGeneralPatch(values(), S()) !== null;
+  // The three typed-in numbers. A box that was emptied (or holds no number) is an unsaved edit too: Save must be
+  // pressable so that it can say what is wrong, instead of sitting dimmed while the field looks changed.
+  const numberChecks = () => [
+    [tokensInput, tokensRow, LIMITS.maxTokens, true, 'longest reply'],
+    [ctxInput, ctxRow, LIMITS.contextBudgetTokens, true, 'context budget'],
+    [timeoutInput, timeoutRow, LIMITS.timeoutSec, true, 'wait time'],
+  ];
+  const hasBadNumber = () => numberChecks().some(([input, , limits, integer]) => !clampNumber(input.value, limits, { integer }));
+  const isDirty = () => buildGeneralPatch(values(), S()) !== null || hasBadNumber();
 
   /** The controls exactly as they are right now (strings for typed fields), to tell later whether a field was touched. */
   const snapshot = () => ({
@@ -256,12 +264,7 @@ export function createGeneralPanel({ app, signal, onChange }) {
   /** Numbers that were typed out of range snap into range; empty / non-numeric ones are reported. */
   function normalizeNumbers() {
     let ok = true;
-    const checks = [
-      [tokensInput, tokensRow, LIMITS.maxTokens, true, 'longest reply'],
-      [ctxInput, ctxRow, LIMITS.contextBudgetTokens, true, 'context budget'],
-      [timeoutInput, timeoutRow, LIMITS.timeoutSec, true, 'wait time'],
-    ];
-    for (const [input, row, limits, integer, name] of checks) {
+    for (const [input, row, limits, integer, name] of numberChecks()) {
       const r = clampNumber(input.value, limits, { integer });
       if (!r) {
         row.setError(`Enter a number between ${limits.min} and ${limits.max} for the ${name}.`);
@@ -288,7 +291,7 @@ export function createGeneralPanel({ app, signal, onChange }) {
     summaryEl.hidden = false;
     mount(summaryEl, notice({
       tone: 'error', role: 'alert',
-      children: [h('strong', null, err.message || 'Some settings need another look'), err.hint ? h('p', { class: 'muted' }, err.hint) : null,
+      children: [h('strong', null, err.message || 'Some settings need another look'), err.hint ? h('p', { class: 'muted' }, inlineCode(err.hint)) : null,
         extra.length ? h('ul', { class: 'settings-error-list' }, extra.map((t) => h('li', null, t))) : null],
     }));
     if (!focusFirstInvalid(form)) summaryEl.scrollIntoView({ block: 'nearest' });
@@ -306,7 +309,7 @@ export function createGeneralPanel({ app, signal, onChange }) {
       if (err instanceof ApiError && err.fields) showErrors(err);
       else {
         summaryEl.hidden = false;
-        mount(summaryEl, notice({ tone: 'error', role: 'alert', children: [h('strong', null, err.message || 'Could not save'), err.hint ? h('p', { class: 'muted' }, err.hint) : null] }));
+        mount(summaryEl, notice({ tone: 'error', role: 'alert', children: [h('strong', null, err.message || 'Could not save'), err.hint ? h('p', { class: 'muted' }, inlineCode(err.hint)) : null] }));
       }
       return false;
     }
@@ -325,7 +328,7 @@ export function createGeneralPanel({ app, signal, onChange }) {
       mount(personaGroup, notice({
         tone: 'warn', role: 'status',
         children: [h('strong', null, 'Could not load the companion styles'), h('p', { class: 'muted' }, (err && err.message) || ''),
-          h('button', { type: 'button', class: 'btn btn-sm', onClick: () => { mount(personaGroup, skeleton(3)); loadPersonas(); } }, 'Try again')],
+          h('button', { type: 'button', class: 'btn btn-sm', 'data-auto-retry': '', onClick: () => { mount(personaGroup, skeleton(3)); loadPersonas(); } }, 'Try again')],
       }));
     });
   }

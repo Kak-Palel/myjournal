@@ -258,9 +258,14 @@ export function mapGeminiError({ status, text, headers, ctx }) {
     });
   }
   if (status === 503 || info.status === 'UNAVAILABLE') {
+    // Live: gemini-flash-latest answers "503 high demand" (after 2-20 s) far more often than the Flash-Lite models.
+    // Pointing someone who is already on a Lite model at the Lite model would be no advice at all.
+    const onLite = /lite/i.test(model);
     return fail('overloaded', 'Gemini is overloaded right now.', {
       ...base,
-      hint: 'This is usually brief. Try again in a moment, or switch to gemini-flash-lite-latest in Settings.',
+      hint: onLite
+        ? 'This is usually brief. Try again in a moment, or pick another model with Load models in Settings.'
+        : 'This is usually brief. Try again in a moment, or switch to gemini-flash-lite-latest in Settings.',
     });
   }
   if (status === 413 || (status === 400 && /token count|maximum number of tokens|too many tokens|input.{0,20}too long|exceeds the maximum/.test(hay))) {
@@ -555,16 +560,19 @@ export function createGeminiProvider(rawCfg, opts = {}) {
 }
 
 /**
- * `*-latest` aliases first (alphabetically, so flash comes before pro), then everything else with the
- * highest id first (newest versions on top).
+ * Picker order: `*-latest` aliases first (alphabetically, so flash comes before pro), then the Gemini models with the
+ * highest id first (newest versions on top), then the Gemma models the same way. Gemma ids sort above every
+ * gemini id alphabetically, which would put the open models above the flagship ones; they also behave differently
+ * (they think by default and took 7 s to the first byte live), so they go last.
  * @param {{id: string, label: string}[]} models
  */
 export function sortGeminiModels(models) {
   const collator = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
-  const alias = (m) => m.id.endsWith('-latest');
+  const rank = (m) => (m.id.endsWith('-latest') ? 0 : /^gemma-/i.test(m.id) ? 2 : 1);
   return [...models].sort((a, b) => {
-    if (alias(a) !== alias(b)) return alias(a) ? -1 : 1;
+    const byRank = rank(a) - rank(b);
+    if (byRank) return byRank;
     const cmp = collator.compare(a.id, b.id) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-    return alias(a) ? cmp : -cmp;
+    return rank(a) === 0 ? cmp : -cmp;
   });
 }

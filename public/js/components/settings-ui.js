@@ -2,7 +2,7 @@
 // labelled fields with inline errors, switches, textareas with counters, copy-able commands, notices and a
 // "busy" wrapper for async buttons. All text goes through h() (text nodes); nothing here builds markup.
 import { h, mount } from '../lib/dom.js';
-import { icon, copyText, toast } from '../lib/ui.js';
+import { icon, copyText, toast, inlineCode } from '../lib/ui.js';
 
 let seq = 0;
 /** Unique DOM id with a readable prefix. */
@@ -118,9 +118,9 @@ export function errorNotice(err, { fallback = 'Something went wrong', onRetry } 
     tone: 'error',
     role: 'alert',
     children: [
-      h('strong', null, message),
-      hint ? h('p', { class: 'muted' }, hint) : null,
-      onRetry ? h('button', { type: 'button', class: 'btn btn-sm', onClick: onRetry }, 'Try again') : null,
+      h('strong', null, inlineCode(message)),
+      hint ? h('p', { class: 'muted' }, inlineCode(hint)) : null,
+      onRetry ? h('button', { type: 'button', class: 'btn btn-sm', 'data-auto-retry': '', onClick: onRetry }, 'Try again') : null,
     ],
   });
 }

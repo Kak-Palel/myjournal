@@ -7,6 +7,12 @@
 // PERMISSION_DENIED "unregistered callers", an invalid key is HTTP 400 API_KEY_INVALID, both verified live),
 // SSE frames end in CRLF CRLF, contents must start with a user turn and alternate, errors use Google's
 // {error:{code,message,status,details}} envelope, and models are paginated with nextPageToken.
+//
+// `createMockGemini({ live: true })` switches on the model-specific behaviour verified against the real service on
+// 2026-10-08 (test/fixtures/gemini-live/README.md): the real 62-entry model list, retired models that answer
+// "404 no longer available", per-family thinkingConfig rules, thought tokens that eat maxOutputTokens, the *-latest
+// aliases resolving to concrete model versions. Latency and overload are opt-in (`slowModels`, `overloadedModels`,
+// failure `afterMs`) so the suite stays fast.
 
 import { readFileSync } from 'node:fs';
 import { allUserText, respond, splitIntoDeltas } from './mock-responder.js';
@@ -19,6 +25,22 @@ export const DEFAULTS = Object.freeze({
   delayMs: 0,
   /** Delay before the first byte, ms. */
   ttfbMs: 0,
+  /**
+   * Live profile (see the header): real model list, retired models, per-family thinking rules and thought tokens.
+   * Anything else passed in the same options object still wins.
+   */
+  live: false,
+  /** `{ 'gemini-2.5-flash': 'gemini-3.8-flash' }`: ids that answer 404 "no longer available" (value = Google's suggested replacement). */
+  retiredModels: {},
+  /** Apply the per-family thinkingConfig rules and thought-token counts of the live models (`live: true` turns this on). */
+  modelQuirks: false,
+  /** `{ 'gemini-flash-latest': 16000 }`: extra delay before the first byte per model (live: 16-23 s for gemini-flash-latest). */
+  slowModels: {},
+  /**
+   * Models that answer `503 UNAVAILABLE` "high demand": an array of ids, or `{ id: { afterMs, times } }` (answers after
+   * `afterMs`; `times` limits how many calls fail, default all). Live: the 503 arrives after 1-20 s.
+   */
+  overloadedModels: {},
   /** Fixed characters per chunk; default is a phrase-sized cycle. */
   chunkSize: 0,
   /** Slice socket writes at arbitrary byte offsets. */
@@ -48,6 +70,7 @@ export const DEFAULTS = Object.freeze({
   /**
    * Behave like the live thinking models: this many tokens (or `true` = 300) of maxOutputTokens are spent on thoughts
    * before the answer starts, so a small cap gives a MAX_TOKENS finish with an empty or truncated answer.
+   * With `modelQuirks` the count follows the model and the request's thinkingConfig instead (see LIVE_THOUGHTS).
    */
   thinkingConsumesBudget: false,
   /** Reject consecutive same-role turns (the live API accepts them; the adapter merges them anyway). */
@@ -108,6 +131,38 @@ export const LIVE_MODELS = (() => {
   }
 })();
 
+/** Retired chat models still listed by models.list that answer 404 (live), with the replacement Google names. */
+export const LIVE_RETIRED = Object.freeze({
+  'gemini-2.5-flash': 'gemini-3.8-flash',
+  'gemini-2.5-pro': 'gemini-3.1-pro-preview',
+});
+
+/** What the *-latest aliases resolved to when captured (modelVersion in the frames). */
+export const LIVE_ALIASES = Object.freeze({
+  'gemini-flash-latest': 'gemini-3.8-flash',
+  'gemini-flash-lite-latest': 'gemini-3.5-flash-lite',
+  'gemini-pro-latest': 'gemini-3.1-pro-preview',
+});
+
+/**
+ * Thought tokens measured live for the journal's reply prompt (auto = no thinkingConfig, low = thinkingLevel low):
+ * flash-lite 0 / ~465, 3.5-flash ~810 / ~350, 3.8-flash 69-286 on "low", gemma-4 ~290 on auto (it rejects "low").
+ */
+export const LIVE_THOUGHTS = Object.freeze({
+  lite: { auto: 0, low: 465 },
+  flash: { auto: 800, low: 320 },
+  gemma: { auto: 290, low: 290 },
+  gemini2: { auto: 0, low: 0 },
+});
+
+/** @returns {'gemma'|'gemini2'|'lite'|'flash'} the behavioural family of a (resolved) model id */
+export function modelFamily(modelId) {
+  const id = LIVE_ALIASES[modelId] || modelId;
+  if (/^gemma-/.test(id)) return 'gemma';
+  if (/^gemini-2(\.|-)/.test(id)) return 'gemini2';
+  return /lite/.test(id) ? 'lite' : 'flash';
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Real error bodies
 
@@ -134,6 +189,10 @@ export const MISSING_KEY_BODY = Object.freeze({
     status: 'PERMISSION_DENIED',
   },
 });
+
+/** Verified live (503 UNAVAILABLE on gemini-flash-latest). */
+export const OVERLOADED_MESSAGE = 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.';
+const retiredMessage = (id, replacement) => `This model models/${id} is no longer available to new users. Please update your code to use models/${replacement} for the latest features and improvements. We recommend you to use the Interactions API (https://ai.google.dev/gemini-api/docs/get-started).`;
 
 const googleError = (code, status, message, details) => ({ error: { code, message, status, ...(details ? { details } : {}) } });
 
@@ -162,6 +221,7 @@ function quotaDetails(quotaId, retryDelay) {
  *   http (`status`, `body`) · safety_prompt (200, promptFeedback.blockReason) · safety_candidate (finishReason SAFETY,
  *   no text) · recitation · max_tokens_empty (finishReason MAX_TOKENS, no text) · empty · thought_only ·
  *   hang · hang_after_headers · reset_before_response · stall/reset/malformed/error_in_stream (`after` chunks) · json_array
+ * Every HTTP failure also takes `afterMs`: the answer arrives that much later (live: a 503 after 3-20 s).
  */
 function failureHttp(spec, ctx) {
   switch (spec.kind) {
@@ -196,9 +256,9 @@ function failureHttp(spec, ctx) {
     case 'not_found':
       return { status: 404, body: googleError(404, 'NOT_FOUND', `models/${spec.model || 'unknown-model'} is not found for API version v1beta, or is not supported for generateContent. Call ModelService.ListModels to see the list of available models and their supported methods.`) };
     case 'model_retired':
-      return { status: 404, body: googleError(404, 'NOT_FOUND', `This model models/${spec.model || 'gemini-2.5-flash'} is no longer available to new users. Please update your code to use models/gemini-3.8-flash for the latest features and improvements.`) };
+      return { status: 404, body: googleError(404, 'NOT_FOUND', retiredMessage(spec.model || 'gemini-2.5-flash', spec.replacement || 'gemini-3.8-flash')) };
     case 'unavailable':
-      return { status: 503, body: googleError(503, 'UNAVAILABLE', 'The model is overloaded. Please try again later.') };
+      return { status: 503, body: googleError(503, 'UNAVAILABLE', OVERLOADED_MESSAGE) };
     case 'internal':
       return { status: 500, body: googleError(500, 'INTERNAL', 'An internal error has occurred. Please retry or report in https://developers.generativeai.google/guide/troubleshooting') };
     case 'deadline':
@@ -267,8 +327,11 @@ function respondHttp(ctx, out) {
   // text/event-stream carrying a plain JSON body.
   const keyError = out.body === INVALID_KEY_BODY || out.body === MISSING_KEY_BODY;
   const streamCall = /:streamGenerateContent$/.test(ctx.url.pathname);
-  const headers = !keyError && streamCall ? { 'Content-Type': 'text/event-stream', ...(out.headers || {}) } : (out.headers || {});
-  sendJson(ctx.res, out.status, out.body ?? {}, headers);
+  // Google pretty-prints its error bodies (2 spaces, trailing newline); key errors say charset=UTF-8.
+  const text = `${JSON.stringify(out.body ?? {}, null, 2)}\n`;
+  const type = !keyError && streamCall ? 'text/event-stream' : 'application/json; charset=UTF-8';
+  ctx.res.writeHead(out.status, { 'Content-Type': type, 'Content-Length': Buffer.byteLength(text), 'Vary': 'Origin, X-Origin, Referer', ...(out.headers || {}) });
+  ctx.res.end(text);
 }
 
 function checkKey(ctx, behavior) {
@@ -297,6 +360,8 @@ function validateGenerate(ctx, behavior, modelId) {
     return { status: 400, body: googleError(400, 'INVALID_ARGUMENT', 'Invalid JSON payload received. Unexpected token.') };
   }
   const models = behavior.models;
+  const retired = behavior.retiredModels && behavior.retiredModels[modelId];
+  if (retired) return failureHttp({ kind: 'model_retired', model: modelId, replacement: retired }, ctx);
   const known = models.find((x) => x.name === `models/${modelId}`);
   if (behavior.strictModel && (!known || !(known.supportedGenerationMethods || []).includes('generateContent'))) {
     return failureHttp({ kind: 'not_found', model: modelId }, ctx);
@@ -340,12 +405,32 @@ function validateGenerate(ctx, behavior, modelId) {
       return { status: 400, body: googleError(400, 'INVALID_ARGUMENT', 'Request contains an invalid argument.') };
     }
   }
+  const quirk = tc && behavior.modelQuirks ? thinkingQuirk(modelId, tc) : null;
+  if (quirk) return { status: 400, body: googleError(400, 'INVALID_ARGUMENT', quirk) };
   if (body.systemInstruction) {
     const rule = behavior.rejectSystemInstruction;
     if (rule === true || (rule instanceof RegExp && rule.test(modelId))) {
       return { status: 400, body: googleError(400, 'INVALID_ARGUMENT', `Developer instruction is not enabled for models/${modelId}`) };
     }
   }
+  return null;
+}
+
+/**
+ * What the live models say to a thinkingConfig (null = accepted). Verified 2026-10-08:
+ *  - gemma-* and gemini-2.x: any thinkingLevel -> "Thinking level is not supported for this model."; thinkingBudget is fine;
+ *  - Lite 3.x (gemini-flash-lite-latest = 3.5-flash-lite): every level incl. minimal is fine; thinkingBudget 0 -> bare "invalid argument";
+ *  - Flash/Pro 3.x (gemini-3.8-flash): minimal -> "Thinking level MINIMAL is not supported ..."; thinkingBudget 0 -> bare "invalid argument".
+ */
+function thinkingQuirk(modelId, tc) {
+  const family = modelFamily(modelId);
+  if (typeof tc.thinkingLevel === 'string') {
+    if (family === 'gemma' || family === 'gemini2') return 'Thinking level is not supported for this model.';
+    if (family === 'flash' && tc.thinkingLevel.toLowerCase() === 'minimal') {
+      return 'Thinking level MINIMAL is not supported for this model. Please retry with other thinking level.';
+    }
+  }
+  if (tc.thinkingBudget === 0 && (family === 'lite' || family === 'flash')) return 'Request contains an invalid argument.';
   return null;
 }
 
@@ -362,16 +447,25 @@ async function resolveReply(behavior, ctx) {
   return { text: respond(ctx.messages) };
 }
 
-/** How many output tokens would go on thoughts before the answer starts (0 = thinking is not simulated). */
-function thoughtTokens(behavior) {
-  if (!behavior.thinkingConsumesBudget) return 0;
-  return behavior.thinkingConsumesBudget === true ? 300 : Number(behavior.thinkingConsumesBudget) || 0;
+/**
+ * How many output tokens would go on thoughts before the answer starts (0 = thinking is not simulated).
+ * `thinkingConsumesBudget` is a flat number; `modelQuirks` looks the model and its thinkingConfig up in LIVE_THOUGHTS.
+ */
+function thoughtTokens(behavior, modelId, body) {
+  if (behavior.thinkingConsumesBudget) return behavior.thinkingConsumesBudget === true ? 300 : Number(behavior.thinkingConsumesBudget) || 0;
+  if (!behavior.modelQuirks) return 0;
+  const tc = body && body.generationConfig && body.generationConfig.thinkingConfig;
+  const mode = tc && (tc.thinkingLevel === 'low' || tc.thinkingLevel === 'minimal' || tc.thinkingBudget === 0) ? 'low' : 'auto';
+  if (tc && tc.thinkingBudget === 0) return 0;
+  return LIVE_THOUGHTS[modelFamily(modelId)][mode];
 }
 
 function candidateChunk(parts, extra = {}) {
-  return { candidates: [{ content: { parts, role: 'model' }, index: 0, ...extra }] };
+  // Live key order: content, finishReason (last frame only), index.
+  return { candidates: [{ content: { parts, role: 'model' }, ...extra, index: 0 }] };
 }
 
+/** usageMetadata in the live shape and key order (see stream-success*.body). */
 function usageFor(body, outputText, thoughts = 0) {
   const prompt = estimateTokens((body.contents || []).map((c) => (c.parts || []).map((p) => p.text).join('')).join(' '));
   const out = outputText ? estimateTokens(outputText) : 0;
@@ -379,14 +473,28 @@ function usageFor(body, outputText, thoughts = 0) {
     promptTokenCount: prompt,
     ...(out ? { candidatesTokenCount: out } : {}),
     totalTokenCount: prompt + out + thoughts,
+    promptTokensDetails: [{ modality: 'TEXT', tokenCount: prompt }],
     ...(thoughts ? { thoughtsTokenCount: thoughts } : {}),
+    serviceTier: 'standard',
   };
+}
+
+/**
+ * JSON the way Google serialises SSE frames: a space after every colon and none after commas
+ * (`{"candidates": [{"content": {"parts": [{"text": "Hi"}],"role": "model"},"index": 0}],...`).
+ */
+export function googleJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((v) => googleJson(v === undefined ? null : v)).join(',')}]`;
+  const parts = [];
+  for (const [k, v] of Object.entries(value)) if (v !== undefined) parts.push(`${JSON.stringify(k)}: ${googleJson(v)}`);
+  return `{${parts.join(',')}}`;
 }
 
 /** Build the list of response objects (one per SSE frame) for a reply. */
 function buildResponses(reply, body, behavior, modelId, spec) {
   const kind = spec && spec.kind;
-  const base = { modelVersion: modelId, responseId: `mockresp${Date.now().toString(36)}` };
+  const base = { modelVersion: LIVE_ALIASES[modelId] || modelId, responseId: `mockresp${Date.now().toString(36)}` };
   if (kind === 'safety_prompt') {
     return [{ promptFeedback: { blockReason: 'SAFETY', safetyRatings: [{ category: 'HARM_CATEGORY_HARASSMENT', probability: 'HIGH' }] }, usageMetadata: usageFor(body, ''), ...base }];
   }
@@ -394,7 +502,7 @@ function buildResponses(reply, body, behavior, modelId, spec) {
     return [{ candidates: [{ finishReason: kind === 'recitation' ? 'RECITATION' : 'SAFETY', index: 0, safetyRatings: [{ category: 'HARM_CATEGORY_DANGEROUS_CONTENT', probability: 'HIGH' }] }], usageMetadata: usageFor(body, ''), ...base }];
   }
   const cap = body.generationConfig && Number.isFinite(body.generationConfig.maxOutputTokens) ? body.generationConfig.maxOutputTokens : 8192;
-  const spent = thoughtTokens(behavior);
+  const spent = thoughtTokens(behavior, modelId, body);
   if (kind === 'max_tokens_empty' || (spent > 0 && cap <= spent)) {
     const used = kind === 'max_tokens_empty' ? Math.min(cap, 16) : cap;
     return [{ candidates: [{ content: { role: 'model' }, finishReason: 'MAX_TOKENS', index: 0 }], usageMetadata: { ...usageFor(body, '', used), candidatesTokenCount: undefined }, ...base }];
@@ -418,11 +526,14 @@ function buildResponses(reply, body, behavior, modelId, spec) {
   // Live captures: the text frames carry running usage, and the last frame is an empty-text part (with a
   // thoughtSignature) that holds the finishReason. `trailingFrame: false` puts finishReason on the last text frame.
   const trailing = behavior.trailingFrame && pieces.length > 0;
+  let soFar = '';
   pieces.forEach((piece, i) => {
     const last = i === pieces.length - 1;
+    soFar += piece;
+    // Live: every text frame carries the running candidatesTokenCount; thoughts are only counted once they are over (frame 1).
     responses.push({
       ...candidateChunk([{ text: piece }], last && !trailing ? { finishReason: finish } : {}),
-      usageMetadata: last ? usageFor(body, text, thoughtCount) : usageFor(body, ''),
+      usageMetadata: usageFor(body, soFar, thoughtCount),
       ...base,
     });
   });
@@ -442,6 +553,20 @@ function buildResponses(reply, body, behavior, modelId, spec) {
   return responses;
 }
 
+/** The `overloadedModels` entry for a model that must answer 503 now (its `times` budget is used up here), else null. */
+function overloadFor(behavior, modelId) {
+  const cfg = behavior.overloadedModels;
+  if (!cfg) return null;
+  const entry = Array.isArray(cfg) ? (cfg.includes(modelId) ? {} : null) : cfg[modelId];
+  if (!entry) return null;
+  const spec = entry === true ? {} : entry;
+  if (Number.isFinite(spec.times)) {
+    if (spec.times <= 0) return null;
+    spec.times -= 1;
+  }
+  return { afterMs: spec.afterMs || 0 };
+}
+
 async function handleGenerate(ctx, state, modelId, streaming) {
   const { behavior } = state;
   const { conn, res, body } = ctx;
@@ -450,7 +575,11 @@ async function handleGenerate(ctx, state, modelId, streaming) {
     if (spec.kind === 'hang') { await conn.hang(); return; }
     if (spec.kind === 'reset_before_response') { conn.reset(); return; }
     const http = failureHttp(spec, ctx);
-    if (http) { respondHttp(ctx, http); return; }
+    if (http) {
+      if (spec.afterMs > 0 && !(await conn.wait(spec.afterMs))) return;
+      respondHttp(ctx, http);
+      return;
+    }
     if (!STREAM_KINDS.has(spec.kind)) throw new Error(`unknown failure kind "${spec.kind}"`);
   }
   const keyFail = checkKey(ctx, behavior);
@@ -458,6 +587,15 @@ async function handleGenerate(ctx, state, modelId, streaming) {
   const invalid = validateGenerate(ctx, behavior, modelId);
   if (invalid) { respondHttp(ctx, invalid); return; }
 
+  // Live: a valid request to a busy model is answered with 503 after a while; a slow model is just slow to the first byte.
+  const busy = overloadFor(behavior, modelId);
+  if (busy) {
+    if (busy.afterMs > 0 && !(await conn.wait(busy.afterMs))) return;
+    respondHttp(ctx, failureHttp({ kind: 'unavailable' }, ctx));
+    return;
+  }
+  const slow = (behavior.slowModels && behavior.slowModels[modelId]) || 0;
+  if (slow > 0 && !(await conn.wait(slow))) return;
   if (behavior.ttfbMs > 0 && !(await conn.wait(behavior.ttfbMs))) return;
   const index = state.replyIndex;
   state.replyIndex += 1;
@@ -486,14 +624,16 @@ async function handleGenerate(ctx, state, modelId, streaming) {
   }
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
+    'Content-Disposition': 'attachment',
+    'Vary': 'Origin, X-Origin, Referer',
+    'X-Content-Type-Options': 'nosniff',
     'Server-Timing': 'gfet4t7; dur=300',
   });
   res.flushHeaders();
   if (spec && spec.kind === 'hang_after_headers') { await conn.hang(); return; }
 
   let seed = 0;
-  const frame = (obj) => `data: ${typeof obj === 'string' ? obj : JSON.stringify(obj)}\r\n\r\n`;
+  const frame = (obj) => `data: ${typeof obj === 'string' ? obj : googleJson(obj)}\r\n\r\n`;
   const emit = (str) => {
     seed += 1;
     return behavior.byteSplit ? conn.writeSliced(str, seed) : conn.write(str);
@@ -505,7 +645,7 @@ async function handleGenerate(ctx, state, modelId, streaming) {
     if (midStream.kind === 'reset') { conn.reset(); return true; }
     if (midStream.kind === 'stall') { await conn.hang(); return true; }
     if (midStream.kind === 'error_in_stream') {
-      await emit(frame(googleError(503, 'UNAVAILABLE', 'The model is overloaded. Please try again later.')));
+      await emit(frame(googleError(503, 'UNAVAILABLE', OVERLOADED_MESSAGE)));
       res.end();
       return true;
     }
@@ -558,10 +698,16 @@ async function handleList(ctx, state) {
 export async function createMockGemini(options = {}) {
   const { port = 0, host = '127.0.0.1', ...rest } = options;
   if (typeof rest.replies === 'string') rest.replies = [rest.replies];
+  const live = rest.live ? { retiredModels: { ...LIVE_RETIRED }, modelQuirks: true } : {};
   const state = {
-    behavior: { ...DEFAULTS, ...rest, models: [...(rest.models || DEFAULT_MODELS)] },
+    behavior: { ...DEFAULTS, ...live, ...rest, models: [...(rest.models || (rest.live ? LIVE_MODELS : DEFAULT_MODELS))] },
     replyIndex: 0,
   };
+  // overloadedModels entries carry a mutable `times` counter: copy them so one mock never changes the caller's object.
+  if (state.behavior.overloadedModels && !Array.isArray(state.behavior.overloadedModels)) {
+    state.behavior.overloadedModels = Object.fromEntries(Object.entries(state.behavior.overloadedModels)
+      .map(([id, v]) => [id, v && typeof v === 'object' ? { ...v } : v]));
+  }
   if (Array.isArray(rest.failures)) state.behavior.failures = [...rest.failures];
   if (Array.isArray(rest.modelsFailures)) state.behavior.modelsFailures = [...rest.modelsFailures];
 
@@ -603,8 +749,11 @@ export async function createMockGemini(options = {}) {
     close: server.close,
     setBehavior(patch) {
       const next = { ...patch };
-      for (const key of ['failures', 'modelsFailures', 'models']) {
+      for (const key of ['failures', 'modelsFailures', 'models', 'overloadedModels']) {
         if (Array.isArray(next[key])) next[key] = [...next[key]];
+      }
+      if (next.overloadedModels && !Array.isArray(next.overloadedModels)) {
+        next.overloadedModels = Object.fromEntries(Object.entries(next.overloadedModels).map(([id, v]) => [id, v && typeof v === 'object' ? { ...v } : v]));
       }
       if (typeof next.replies === 'string') next.replies = [next.replies];
       Object.assign(state.behavior, next);

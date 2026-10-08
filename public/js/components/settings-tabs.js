@@ -34,6 +34,16 @@ export function createTabs({ tabs, active, label, onSelect }) {
   }
   const el = h('div', { class: 'settings-tabs' }, list);
 
+  /** Slide the tab strip (not the page) just enough that the selected tab is fully visible. */
+  function revealActive() {
+    const btn = buttons.get(current);
+    const strip = list.getBoundingClientRect();
+    const tab = btn.getBoundingClientRect();
+    if (strip.width === 0) return; // not laid out yet
+    if (tab.left < strip.left) list.scrollLeft += tab.left - strip.left - 12;
+    else if (tab.right > strip.right) list.scrollLeft += tab.right - strip.right + 12;
+  }
+
   function paint({ scroll }) {
     for (const [id, btn] of buttons) {
       const on = id === current;
@@ -41,7 +51,7 @@ export function createTabs({ tabs, active, label, onSelect }) {
       btn.tabIndex = on ? 0 : -1;
       btn.classList.toggle('is-active', on);
     }
-    if (scroll) buttons.get(current).scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if (scroll) revealActive();
   }
 
   async function request(id, { focus }) {
@@ -71,6 +81,7 @@ export function createTabs({ tabs, active, label, onSelect }) {
   }
 
   paint({ scroll: false });
+  requestAnimationFrame(revealActive); // a deep link (#/settings?tab=local) opens with its tab in view on a narrow screen
   return {
     el,
     active: () => current,

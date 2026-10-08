@@ -58,7 +58,7 @@ export function sectionError(message, onRetry) {
     icon('alert'),
     h('div', { class: 'notice-body' },
       h('strong', null, message),
-      onRetry ? h('button', { type: 'button', class: 'btn btn-sm', onClick: onRetry }, 'Try again') : null));
+      onRetry ? h('button', { type: 'button', class: 'btn btn-sm', 'data-auto-retry': '', onClick: onRetry }, 'Try again') : null));
 }
 
 export function sectionSkeleton(lines = 3) {

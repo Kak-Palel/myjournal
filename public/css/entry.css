@@ -36,10 +36,10 @@
 .entry-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 1rem; padding-left: 0.5rem; }
 .entry-date-wrap { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--text-muted); cursor: pointer; }
 .entry-date {
-  min-height: 36px; padding: 0.25rem 0.5rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  min-height: 36px; padding: 0.25rem 0.5rem; border: 1px solid var(--control-border); border-radius: var(--radius-sm);
   background: var(--surface); color: var(--text); font: inherit; font-size: 0.9rem;
 }
-.entry-date:hover { border-color: var(--border-strong); }
+.entry-date:hover { border-color: var(--text-muted); }
 .entry-labels { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; margin-top: 0.85rem; padding-left: 0.5rem; }
 .entry-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
 .entry-chip {
@@ -217,7 +217,10 @@
   background: linear-gradient(to bottom, transparent, var(--bg) 1.4rem);
 }
 .entry-banner-host:empty { display: none; }
-.entry-banner { margin-bottom: 0.65rem; box-shadow: var(--shadow-sm); border-color: color-mix(in srgb, currentColor 8%, transparent); }
+.entry-banner { position: relative; margin-bottom: 0.65rem; box-shadow: var(--shadow-sm); border-color: color-mix(in srgb, currentColor 8%, transparent); }
+.entry-banner .notice-body { padding-right: 2.6rem; }
+.entry-banner .notice-body p { font-size: 0.92rem; }
+.entry-dismiss { position: absolute; top: 0.3rem; right: 0.3rem; color: var(--text-muted); }
 /* Provider errors quote the URL that was tried; one unbroken token must wrap, not widen the page. */
 .entry-banner .notice-body { overflow-wrap: anywhere; }
 .entry-banner-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.6rem; }
@@ -225,7 +228,7 @@
 
 .entry-composer { margin: 0; }
 .entry-box {
-  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 20px; box-shadow: var(--shadow);
+  background: var(--surface); border: 1px solid var(--control-border); border-radius: 20px; box-shadow: var(--shadow);
   transition: border-color 0.12s, box-shadow 0.12s;
 }
 .entry-box:focus-within { border-color: var(--focus); box-shadow: var(--shadow), 0 0 0 3px var(--entry-ring); }
@@ -252,6 +255,9 @@
 @media (max-width: 899px) {
   .entry-dock { bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); }
   .entry-page { min-height: calc(100vh - var(--tabbar-h) - 3rem); }
+}
+@media (max-height: 560px) {
+  .entry-hint { display: none; } /* a short window (landscape phone, keyboard open) keeps the room for the conversation */
 }
 @media (max-width: 520px) {
   .entry-long { display: none; }

@@ -1,0 +1,2 @@
+{"status":"pulling manifest"}
+{"error":"pull model manifest: Get \"https://registry.ollama.ai/v2/library/smollm2/manifests/360m\": Forbidden"}

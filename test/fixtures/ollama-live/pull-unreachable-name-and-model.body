@@ -1,0 +1,2 @@
+{"status":"pulling manifest"}
+{"error":"pull model manifest: Get \"https://registry.ollama.ai/v2/library/qwen2.5/manifests/1.5b\": Forbidden"}

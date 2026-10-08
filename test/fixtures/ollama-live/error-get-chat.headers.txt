@@ -1,0 +1,6 @@
+HTTP/1.1 405 Method Not Allowed
+Allow: POST
+Content-Type: text/plain
+Date: Thu, 08 Oct 2026 14:40:03 GMT
+Content-Length: 22
+

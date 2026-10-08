@@ -149,6 +149,64 @@ test('LIVE: the captured bare "Request contains an invalid argument." also drops
   assert.deepEqual(seen, [{ thinkingLevel: 'low' }, undefined]);
 });
 
+test('LIVE: gemma-4 / gemini-2.5 reject every thinkingLevel ("Thinking level is not supported") -> low is dropped once and remembered for that model', async () => {
+  clearGeminiQuirks();
+  const rejected = captured('error-thinking-level-unsupported');
+  const success = captured('stream-success');
+  assert.equal(rejected.status, 400);
+  const seen = [];
+  const fetchFn = async (url, init) => {
+    const cfg = JSON.parse(init.body).generationConfig.thinkingConfig;
+    seen.push(cfg);
+    const pick = cfg ? rejected : success;
+    return new Response(pick.body, { status: pick.status, headers: { 'content-type': pick.contentType } });
+  };
+  const p = createProvider('gemini', { baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemma-4-26b-a4b-it', apiKey: KEY, thinking: 'low' }, { fetch: fetchFn });
+  assert.equal((await drain(p.stream({ messages: HELLO }))).text, 'Hello, my favorite color is blue!');
+  assert.equal((await drain(p.stream({ messages: HELLO }))).text, 'Hello, my favorite color is blue!');
+  assert.deepEqual(seen, [{ thinkingLevel: 'low' }, undefined, undefined], 'one rejected attempt in total, not one per request');
+});
+
+test('LIVE: 503 "high demand" -> exactly one automatic retry, then overloaded; the hint sends flash users to Flash-Lite and Lite users elsewhere', async () => {
+  const busy = captured('error-overloaded-503');
+  assert.equal(busy.status, 503);
+  assert.match(busy.contentType, /event-stream/, 'live: errors on :streamGenerateContent are labelled text/event-stream');
+  const waits = [];
+  const attempts = (model) => {
+    let n = 0;
+    const fetchFn = async () => { n += 1; return new Response(busy.body, { status: busy.status, headers: { 'content-type': busy.contentType } }); };
+    return { fetchFn, count: () => n, provider: createProvider('gemini', { baseUrl: 'https://generativelanguage.googleapis.com', model, apiKey: KEY }, { fetch: fetchFn, sleep: async (ms) => { waits.push(ms); } }) };
+  };
+  const flash = attempts('gemini-flash-latest');
+  const err = await rejection(drain(flash.provider.stream({ messages: HELLO })));
+  assert.equal(err.code, 'overloaded');
+  assert.equal(err.status, 503);
+  assert.equal(flash.count(), 2, 'first try + one retry, never more');
+  assert.equal(waits.length, 1);
+  assert.match(err.hint, /switch to gemini-flash-lite-latest in Settings/);
+  assert.match(err.detail, /high demand/);
+  const lite = attempts('gemini-flash-lite-latest');
+  const liteErr = await rejection(drain(lite.provider.stream({ messages: HELLO })));
+  assert.equal(liteErr.code, 'overloaded');
+  assert.ok(!/switch to gemini-flash-lite-latest/.test(liteErr.hint), 'no advice to switch to the model that is already in use');
+  assert.match(liteErr.hint, /Load models/);
+});
+
+test('LIVE: a 503 that clears on the retry is invisible to the caller', async () => {
+  const busy = captured('error-overloaded-503');
+  const ok = captured('stream-success');
+  let n = 0;
+  const fetchFn = async () => {
+    n += 1;
+    const pick = n === 1 ? busy : ok;
+    return new Response(pick.body, { status: pick.status, headers: { 'content-type': pick.contentType } });
+  };
+  const p = createProvider('gemini', { baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-flash-latest', apiKey: KEY }, { fetch: fetchFn, sleep: async () => {} });
+  const r = await drain(p.stream({ messages: HELLO }));
+  assert.equal(r.text, 'Hello, my favorite color is blue!');
+  assert.equal(n, 2);
+});
+
 test('LIVE: neither thinkingLevel "minimal" nor thinkingBudget is ever sent (both are rejected by current models)', async () => {
   const success = captured('stream-success');
   const raw = [];
@@ -186,10 +244,10 @@ test('LIVE: models.list -> chat models only, aliases first, newest first', async
   const ids = models.map((m) => m.id);
   assert.deepEqual(ids, [
     'gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-pro-latest',
-    'gemma-4-31b-it', 'gemma-4-26b-a4b-it',
     'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-3.5-flash',
     'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview',
     'gemini-2.5-pro', 'gemini-2.5-flash-lite', 'gemini-2.5-flash',
+    'gemma-4-31b-it', 'gemma-4-26b-a4b-it',
   ]);
   const unwanted = /embed|aqa|imagen|veo|tts|image|banana|live|audio|transcribe|omni|robotics|computer-use|customtools|learnlm|lyria|antigravity|deep-research/;
   assert.deepEqual(ids.filter((id) => !/^(gemini|gemma)-/.test(id) || unwanted.test(id)), [], 'only chat models are offered');

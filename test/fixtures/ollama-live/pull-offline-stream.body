@@ -1,0 +1,2 @@
+{"status":"pulling manifest"}
+{"error":"pull model manifest: Get \"https://registry.ollama.ai/v2/library/llama3.2/manifests/3b\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused"}

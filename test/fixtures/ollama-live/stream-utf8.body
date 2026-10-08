@@ -1,0 +1,24 @@
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"role":"assistant","content":"カ"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"フェ"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"・"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"デ"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"ュ"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"・"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"ビ"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"ュ"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{"content":"ー"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-721","object":"chat.completion.chunk","created":1791471186,"model":"llama3.2:1b","system_fingerprint":"fp_ollama","choices":[],"usage":{"prompt_tokens":57,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens":10,"total_tokens":67},"timings":{"prompt_n":57,"prompt_ms":304,"prompt_per_token_ms":5.333333333333333,"prompt_per_second":187.5,"predicted_n":10,"predicted_ms":304,"predicted_per_token_ms":30.4,"predicted_per_second":32.89473684210526}}
+
+data: [DONE]
+

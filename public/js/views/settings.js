@@ -3,6 +3,7 @@
 // (hidden) so unsaved edits survive until the user decides what to do with them.
 import { h, mount } from '../lib/dom.js';
 import { api } from '../lib/api.js';
+import { replaceHash } from '../lib/router.js';
 import { icon, skeleton, showError, openModal } from '../lib/ui.js';
 import { createTabs, tabButtonId, tabPanelId } from '../components/settings-tabs.js';
 import { createProviderForm } from '../components/settings-provider-form.js';
@@ -103,8 +104,9 @@ export default async function settingsView(ctx) {
     entry.wrap.hidden = false;
     shownId = id;
     entry.comp.shown();
-    history.replaceState(null, '', tabHash(id, { setup }));
+    replaceHash(tabHash(id, { setup }));
     paintBanner();
+    paintStatus(); // "go to its tab" is only offered while another tab is open
   }
 
   /**
@@ -117,6 +119,12 @@ export default async function settingsView(ctx) {
     if (asking) return false;
     asking = true;
     try {
+      // A panel counts as unsaved until the server has answered its Save: leaving right after pressing Save waits for
+      // that answer instead of asking about changes that are already being saved.
+      if (app.savesInFlight()) {
+        await app.savesSettled();
+        await new Promise((resolve) => setTimeout(resolve, 0)); // let each panel finish showing what was saved
+      }
       for (const [id, { comp }] of panels) {
         if (!comp.isDirty()) continue;
         const label = (SETTINGS_TABS.find((t) => t.id === id) || {}).label || 'current';
@@ -195,7 +203,9 @@ export default async function settingsView(ctx) {
     const goto = (id) => h('button', { type: 'button', class: 'link-btn', onClick: async () => { if (await gate(id)) tabs.select(id, { focus: true }); } }, id === 'general' ? 'General settings' : 'open its tab');
     let body;
     if (!ai.enabled) {
-      body = [h('strong', null, 'AI companion is off.'), ' MyJournal works as a plain private journal. Turn it on in ', goto('general'), '.'];
+      body = shownId === 'general'
+        ? [h('strong', null, 'AI companion is off.'), ' MyJournal works as a plain private journal. Turn it on with the switch below.']
+        : [h('strong', null, 'AI companion is off.'), ' MyJournal works as a plain private journal. Turn it on in ', goto('general'), '.'];
     } else if (!ai.provider) {
       body = [h('strong', null, 'No AI provider chosen yet.'), ' Pick a tab below to set one up, or keep journaling without AI.'];
     } else {
@@ -204,7 +214,7 @@ export default async function settingsView(ctx) {
       body = [
         h('strong', null, `Using ${PROVIDER_NAMES[ai.provider]}`), p && p.model ? h('span', { class: 'settings-status-model' }, ` - ${p.model}`) : null,
         ready ? h('span', { class: 'chip chip-primary' }, icon('check', { size: 14 }), 'Ready') : h('span', { class: 'chip chip-warn' }, ai.provider === 'local' ? 'Choose a model' : 'Needs a key'),
-        ' ', goto(ai.provider),
+        shownId === ai.provider ? null : [' ', goto(ai.provider)],
       ];
     }
     statusEl.className = `settings-status${ai.enabled && ai.provider && app.aiReady() ? ' is-ready' : ''}`;

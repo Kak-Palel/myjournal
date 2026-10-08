@@ -3,7 +3,7 @@
 import { h, mount } from '../lib/dom.js';
 import { api, ApiError } from '../lib/api.js';
 import { renderMarkdown } from '../lib/markdown.js';
-import { icon, toast, confirmDialog, copyText } from '../lib/ui.js';
+import { icon, toast, confirmDialog, copyText, inlineCode } from '../lib/ui.js';
 import { describeWeeklyFailure, reportMeta, reportPeriod, sortReports } from './insights-logic.js';
 import { notice, withBusy } from './settings-ui.js';
 
@@ -121,8 +121,8 @@ export function createWeeklyCard({ app, signal, today }) {
       tone: f.tone === 'error' ? 'error' : f.tone === 'warn' ? 'warn' : 'info',
       role: f.tone === 'error' ? 'alert' : 'status',
       children: [
-        h('strong', null, f.message),
-        f.hint ? h('p', { class: 'muted' }, f.hint) : null,
+        h('strong', null, inlineCode(f.message)),
+        f.hint ? h('p', { class: 'muted' }, inlineCode(f.hint)) : null,
         partial ? h('p', { class: 'muted small' }, 'What was written before it stopped is shown below. It was not saved.') : null,
         h('div', { class: 'row' },
           f.action ? h('a', { class: 'btn btn-sm', href: f.action.href }, f.action.label) : null,
@@ -202,7 +202,7 @@ export function createWeeklyCard({ app, signal, today }) {
       paintList();
     } catch (err) {
       if (isAbort(err)) return;
-      mount(listHost, notice({ tone: 'error', role: 'alert', children: [h('strong', null, err.message || 'Could not load your reflections'), err.hint ? h('p', { class: 'muted' }, err.hint) : null, h('button', { type: 'button', class: 'btn btn-sm', onClick: () => load() }, 'Try again')] }));
+      mount(listHost, notice({ tone: 'error', role: 'alert', children: [h('strong', null, err.message || 'Could not load your reflections'), err.hint ? h('p', { class: 'muted' }, err.hint) : null, h('button', { type: 'button', class: 'btn btn-sm', 'data-auto-retry': '', onClick: () => load() }, 'Try again')] }));
     }
   }
 

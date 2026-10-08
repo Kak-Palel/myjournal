@@ -1,0 +1,11 @@
+HTTP/2 503 
+content-length: 198
+content-type: text/event-stream
+date: Thu, 08 Oct 2026 14:48:40 GMT
+server: scaffolding on HTTPServer2
+server-timing: gfet4t7; dur=399
+vary: Origin, X-Origin, Referer
+x-content-type-options: nosniff
+x-frame-options: SAMEORIGIN
+x-xss-protection: 0
+

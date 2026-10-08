@@ -13,6 +13,16 @@ export class ApiError extends Error {
 
 const BASE = '/api';
 
+// Tell the app when the server stops answering (and when it answers again) so it can show one calm banner instead of
+// every view failing on its own. Only transitions are reported, never every failed request.
+let serverReachable = true;
+/** Report that the server did (true) or did not (false) answer. Also used by the router when a view file cannot be fetched. */
+export function reportReachable(ok) {
+  if (ok === serverReachable) return;
+  serverReachable = ok;
+  if (typeof window !== 'undefined' && typeof CustomEvent === 'function') window.dispatchEvent(new CustomEvent(ok ? 'myjournal:online' : 'myjournal:offline'));
+}
+
 function errorFromBody(status, body) {
   const e = body && body.error ? body.error : {};
   return new ApiError({
@@ -42,9 +52,12 @@ async function doFetch(method, path, body, signal, extraHeaders) {
     init.body = JSON.stringify(body);
   }
   try {
-    return await fetch(BASE + path, init);
+    const res = await fetch(BASE + path, init);
+    reportReachable(true);
+    return res;
   } catch (err) {
     if (err && err.name === 'AbortError') throw err;
+    reportReachable(false);
     throw new ApiError({
       code: 'network',
       message: 'Could not reach the MyJournal server.',
@@ -142,6 +155,7 @@ async function stream(path, body, { signal, onEvent, method = 'POST' } = {}) {
     parser.end();
   } catch (err) {
     if (err && err.name === 'AbortError') return { aborted: true };
+    reportReachable(false); // may just be a dropped stream: the app confirms with a health check before it says anything
     throw new ApiError({ code: 'network', message: 'The connection was interrupted.', hint: 'Your text is saved. Try again.' });
   }
   return { aborted: false };

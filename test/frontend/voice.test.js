@@ -12,7 +12,7 @@ import { draftKey, readDraft, writeDraft, removeDraft, createDraftSaver } from '
 import { normalizeLabel, addLabel, removeLabel, LABEL_LIMITS } from '../../public/js/components/entry-labels.js';
 import { describeProblem, settingsLink, MAX_MESSAGE_CHARS } from '../../public/js/components/entry-errors.js';
 import {
-  nextRevealSize, splitChunk, createRevealer, distanceFromBottom, isNearBottom, announcementExcerpt,
+  splitChunk, createRevealer, distanceFromBottom, isNearBottom, announcementExcerpt,
 } from '../../public/js/components/entry-stream.js';
 import {
   entryTitle, previewText, monthKey, monthStart, groupByMonth, searchTerms, highlightSegments, parseFilters, filtersToParams, hasActiveFilters, listPath,
@@ -576,13 +576,6 @@ describe('entry-errors', () => {
 
 /* ================================================================== streaming maths */
 describe('entry-stream', () => {
-  test('nextRevealSize shows small backlogs at once and drains big ones gradually', () => {
-    assert.equal(nextRevealSize(0), 0);
-    assert.equal(nextRevealSize(10), 10);
-    assert.equal(nextRevealSize(48), 48);
-    assert.equal(nextRevealSize(800), 100);
-    assert.ok(nextRevealSize(100_000) < 100_000);
-  });
   test('splitChunk never cuts a surrogate pair', () => {
     assert.deepEqual(splitChunk('abcdef', 3), ['abc', 'def']);
     assert.deepEqual(splitChunk('abc', 10), ['abc', '']);
@@ -593,12 +586,17 @@ describe('entry-stream', () => {
     assert.ok(!/^[\udc00-\udfff]/.test(rest), 'rest must not start with a lone low surrogate');
   });
 
+  /** Fake animation frames plus a clock that only moves when the test says so. */
   function fakeFrames() {
     const queue = [];
+    const clock = { t: 0 };
     return {
+      clock,
+      now: () => clock.t,
       schedule: (fn) => { queue.push(fn); return queue.length; },
       cancel: (id) => { queue[id - 1] = null; },
-      run() { const fns = queue.splice(0); for (const fn of fns) if (fn) fn(); return fns.filter(Boolean).length; },
+      /** Advance one 60 Hz frame and run what was scheduled. */
+      run(ms = 16) { clock.t += ms; const fns = queue.splice(0); for (const fn of fns) if (fn) fn(clock.t); return fns.filter(Boolean).length; },
       get queued() { return queue.filter(Boolean).length; },
     };
   }
@@ -606,7 +604,7 @@ describe('entry-stream', () => {
   test('revealer batches many pushes into one frame', () => {
     const frames = fakeFrames();
     const out = [];
-    const r = createRevealer({ append: (t) => out.push(t), schedule: frames.schedule, cancel: frames.cancel });
+    const r = createRevealer({ append: (t) => out.push(t), schedule: frames.schedule, cancel: frames.cancel, now: frames.now });
     r.push('Hel'); r.push('lo '); r.push('world');
     assert.deepEqual(out, [], 'nothing is written synchronously');
     assert.equal(frames.queued, 1, 'one frame requested for three pushes');
@@ -614,23 +612,24 @@ describe('entry-stream', () => {
     assert.deepEqual(out, ['Hello world']);
     assert.equal(frames.queued, 0);
   });
-  test('a big chunk drains over several frames and loses no text', () => {
+  test('a big chunk is typed out over several frames and loses no text', () => {
     const frames = fakeFrames();
     let written = '';
     let frameCount = 0;
     const text = 'lorem ipsum 😀 '.repeat(120);
-    const r = createRevealer({ append: (t) => { written += t; }, schedule: frames.schedule, cancel: frames.cancel, onFrame: () => { frameCount += 1; } });
+    const r = createRevealer({ append: (t) => { written += t; }, schedule: frames.schedule, cancel: frames.cancel, now: frames.now, onFrame: () => { frameCount += 1; } });
     r.push(text);
     let guard = 0;
-    while (frames.run() && guard < 500) guard += 1;
+    while (frames.run() && guard < 600) guard += 1;
     assert.equal(written, text);
-    assert.ok(frameCount > 3 && frameCount < 80, `frames: ${frameCount}`);
+    assert.ok(frameCount > 10, `frames: ${frameCount}`);
+    assert.ok(frames.clock.t <= 1300, `finished after ${frames.clock.t} ms`);
     assert.equal(r.pending(), 0);
   });
   test('smooth=false writes the whole backlog in one frame', () => {
     const frames = fakeFrames();
     let written = '';
-    const r = createRevealer({ append: (t) => { written += t; }, schedule: frames.schedule, cancel: frames.cancel, smooth: false });
+    const r = createRevealer({ append: (t) => { written += t; }, schedule: frames.schedule, cancel: frames.cancel, now: frames.now, smooth: false });
     r.push('x'.repeat(5000));
     frames.run();
     assert.equal(written.length, 5000);
@@ -638,8 +637,8 @@ describe('entry-stream', () => {
   test('flush writes the rest immediately; cancel drops it', () => {
     const frames = fakeFrames();
     let written = '';
-    const r = createRevealer({ append: (t) => { written += t; }, schedule: frames.schedule, cancel: frames.cancel });
-    r.push('x'.repeat(500));
+    const r = createRevealer({ append: (t) => { written += t; }, schedule: frames.schedule, cancel: frames.cancel, now: frames.now });
+    r.push('word '.repeat(100));
     frames.run();
     const before = written.length;
     assert.ok(before < 500);

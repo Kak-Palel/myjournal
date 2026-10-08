@@ -112,6 +112,20 @@ test('UNAVAILABLE / 503 -> overloaded (hint: switch to Flash-Lite); INTERNAL -> 
   assert.equal(map(502, '<html>Bad gateway</html>').code, 'server');
 });
 
+test('overloaded hint: Lite models are not told to switch to Flash-Lite; listing models (no model) keeps the generic advice', () => {
+  const body = { error: { code: 503, message: 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', status: 'UNAVAILABLE' } };
+  const at = (model) => mapGeminiError({ status: 503, text: JSON.stringify(body), ctx: { ...CTX, model } });
+  for (const model of ['gemini-flash-lite-latest', 'gemini-3.5-flash-lite', 'models/gemini-3.1-flash-lite-preview']) {
+    const err = at(model);
+    assert.equal(err.code, 'overloaded', model);
+    assert.ok(!/switch to gemini-flash-lite-latest/.test(err.hint), model);
+    assert.match(err.hint, /Try again in a moment/, model);
+  }
+  for (const model of ['gemini-flash-latest', 'gemini-3.8-flash', 'gemma-4-31b-it', '']) {
+    assert.match(at(model).hint, /switch to gemini-flash-lite-latest in Settings/, model || '(none)');
+  }
+});
+
 test('FAILED_PRECONDITION about location -> region; other FAILED_PRECONDITION is a plain bad_request', () => {
   const err = map(400, { error: { code: 400, message: 'User location is not supported for the API use.', status: 'FAILED_PRECONDITION' } });
   assert.equal(err.code, 'region');

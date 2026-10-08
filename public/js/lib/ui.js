@@ -110,17 +110,33 @@ export function moodFace(value, { label = false } = {}) {
  */
 export function moodPicker({ value = null, onChange, size = 'md' } = {}) {
   let current = value;
-  const buttons = MOODS.map((m) => h('button', {
+  // Radio-group keyboard model: the group is ONE Tab stop (the chosen mood, or the first when none is chosen), and the
+  // arrow keys move the choice (Home / End jump). Space or Enter on the chosen mood clears it, as a click does.
+  const choose = (i) => { current = MOODS[i].value; paint(); buttons[i].focus(); if (onChange) onChange(current); };
+  const onKey = (e, i) => {
+    let next = -1;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % MOODS.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (i - 1 + MOODS.length) % MOODS.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = MOODS.length - 1;
+    if (next === -1) return;
+    e.preventDefault();
+    choose(next);
+  };
+  const buttons = MOODS.map((m, i) => h('button', {
     type: 'button', class: ['mood-btn', `mood-${size}`], role: 'radio', 'aria-checked': 'false', 'aria-label': m.label, title: m.label,
     dataset: { value: m.value },
     onClick: () => { current = current === m.value ? null : m.value; paint(); if (onChange) onChange(current); },
+    onKeydown: (e) => onKey(e, i),
   }, h('span', { class: 'mood-emoji', 'aria-hidden': 'true' }, m.emoji)));
   const el = h('div', { class: 'mood-picker', role: 'radiogroup', 'aria-label': 'How are you feeling?' }, buttons);
   function paint() {
+    const stop = Math.max(0, MOODS.findIndex((m) => m.value === current)); // nothing chosen: the first button is the stop
     buttons.forEach((b, i) => {
       const on = MOODS[i].value === current;
       b.setAttribute('aria-checked', on ? 'true' : 'false');
       b.classList.toggle('is-active', on);
+      b.tabIndex = i === stop ? 0 : -1;
     });
   }
   paint();
@@ -190,7 +206,7 @@ export function confirmDialog({ title = 'Are you sure?', body = '', confirmLabel
       input = h('input', {
         type: 'text', class: 'input', autocomplete: 'off', 'aria-label': `Type ${requireText} to confirm`, placeholder: requireText,
         onInput: () => { confirmBtn.disabled = input.value.trim() !== requireText; },
-        onKeydown: (e) => { if (e.key === 'Enter' && !confirmBtn.disabled) modal.close(true); },
+        onKeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); if (!confirmBtn.disabled) modal.close(true); } }, // preventDefault: the key press must not also land on the button focus returns to
       });
     }
     const content = h('div', { class: 'stack' },
@@ -210,10 +226,12 @@ export function spinner({ label = 'Loading' } = {}) {
   return h('span', { class: 'spinner', role: 'status', 'aria-label': label });
 }
 
-export function emptyState({ icon: iconName = 'sprout', title = '', body = '', action = null } = {}) {
+export function emptyState({ icon: iconName = 'sprout', title = '', body = '', action = null, level = 3 } = {}) {
+  // `level` is the heading level of the title (1-6): pick the one that follows the page's own headings.
+  const tag = `h${Math.min(6, Math.max(1, Math.round(level) || 3))}`;
   return h('div', { class: 'empty' },
     h('div', { class: 'empty-icon' }, icon(iconName, { size: 28 })),
-    title ? h('h3', { class: 'empty-title' }, title) : null,
+    title ? h(tag, { class: 'empty-title' }, title) : null,
     body ? h('p', { class: 'muted' }, body) : null,
     action,
   );
@@ -288,16 +306,54 @@ export function debounce(fn, ms = 250) {
   return wrapped;
 }
 
-/** Grow a textarea with its content up to maxHeight px. Returns a function to re-measure. */
+/**
+ * Grow a textarea with its content up to maxHeight px. `maxHeight` may be a number or a function returning one; a
+ * function is asked again on every measure and whenever the window is resized, so a box that was sized for a tall window
+ * shrinks when the on-screen keyboard or a rotation leaves little room. Returns a function to re-measure.
+ */
 export function autosize(textarea, { maxHeight = 360 } = {}) {
+  const limit = () => (typeof maxHeight === 'function' ? maxHeight() : maxHeight);
   const fit = () => {
+    const max = limit();
     textarea.style.height = 'auto';
-    textarea.style.height = `${Math.min(textarea.scrollHeight + 2, maxHeight)}px`;
-    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? 'auto' : 'hidden';
+    textarea.style.height = `${Math.min(textarea.scrollHeight + 2, max)}px`;
+    textarea.style.overflowY = textarea.scrollHeight > max ? 'auto' : 'hidden';
   };
   textarea.addEventListener('input', fit);
+  if (typeof maxHeight === 'function') watchResize(textarea, fit);
   requestAnimationFrame(fit);
   return fit;
+}
+
+// One shared window listener for every auto-sizing box. Boxes are held weakly (the re-measure functions live in a WeakMap
+// keyed by the box), so a view that is gone, and the detached DOM it leaves behind, can be garbage collected without anyone
+// having to unregister it; dead entries are swept on the next use.
+const resizeFit = new WeakMap();
+const resizeRefs = new Set();
+function sweepResizeRefs() {
+  for (const ref of resizeRefs) { const el = ref.deref(); if (!el || !el.isConnected) resizeRefs.delete(ref); }
+}
+function watchResize(textarea, fit) {
+  sweepResizeRefs();
+  if (resizeRefs.size === 0) window.addEventListener('resize', onWindowResize);
+  resizeFit.set(textarea, fit);
+  resizeRefs.add(new WeakRef(textarea));
+}
+function onWindowResize() {
+  sweepResizeRefs();
+  for (const ref of resizeRefs) { const el = ref.deref(); const fit = el && resizeFit.get(el); if (fit) fit(); }
+  if (resizeRefs.size === 0) window.removeEventListener('resize', onWindowResize);
+}
+
+/**
+ * A max-height for a writing box: `share` of the window height (less in a short window, where a keyboard would otherwise
+ * leave no room for the conversation), kept between `min` and `max` pixels. Pass it to autosize() as `maxHeight`.
+ */
+export function viewportShare(share, { min = 120, max = 340, shortShare = share * 0.75, shortBelow = 600 } = {}) {
+  return () => {
+    const vh = window.innerHeight || 700;
+    return Math.round(Math.max(min, Math.min(max, vh * (vh < shortBelow ? shortShare : share))));
+  };
 }
 
 export async function copyText(text) {
@@ -315,14 +371,35 @@ export async function copyText(text) {
   }
 }
 
+/**
+ * Server messages mark commands and addresses with `backticks`. Turn them into <code> nodes (text only, never markup).
+ * Returns an array of strings and nodes that h() accepts as children.
+ */
+export function inlineCode(text) {
+  return splitCode(text).map((part) => (part.code ? h('code', { class: 'code' }, part.text) : part.text));
+}
+
+/** The pure half of inlineCode(): `a \`b\` c` becomes [{ text: 'a ' }, { text: 'b', code: true }, { text: ' c' }]. */
+export function splitCode(text) {
+  const parts = String(text ?? '').split(/`([^`\n]+)`/);
+  const out = [];
+  parts.forEach((part, i) => { if (part !== '') out.push(i % 2 === 1 ? { text: part, code: true } : { text: part }); });
+  return out;
+}
+
+/** The same text with the backtick markers dropped, for places that can only show a plain string. */
+export function stripCode(text) {
+  return String(text ?? '').replace(/`([^`\n]+)`/g, '$1');
+}
+
 /** Replace a node's children with a labelled error block. */
 export function showError(node, error, { onRetry } = {}) {
   clear(node);
   node.appendChild(h('div', { class: 'notice notice-error', role: 'alert' },
     icon('alert'),
     h('div', { class: 'notice-body' },
-      h('strong', null, error?.message || 'Something went wrong'),
-      error?.hint ? h('p', { class: 'muted' }, error.hint) : null,
-      onRetry ? h('button', { type: 'button', class: 'btn btn-sm', onClick: onRetry }, 'Try again') : null,
+      h('strong', null, inlineCode(error?.message || 'Something went wrong')),
+      error?.hint ? h('p', { class: 'muted' }, inlineCode(error.hint)) : null,
+      onRetry ? h('button', { type: 'button', class: 'btn btn-sm', 'data-auto-retry': '', onClick: onRetry }, 'Try again') : null,
     )));
 }

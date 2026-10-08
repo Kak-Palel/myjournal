@@ -11,7 +11,7 @@ import { iterateNdjson } from './sse.js';
 import { createThinkFilter } from './think-filter.js';
 import { withProviderDefaults } from './config.js';
 import {
-  MAX_OUTPUT_CHARS, chatFromStream, createQuirkStore, createReplyStats, mergeLearned, normalizeUsage, notAnApiError,
+  MAX_ADAPTATIONS, MAX_OUTPUT_CHARS, chatFromStream, createQuirkStore, createReplyStats, mergeLearned, normalizeUsage, notAnApiError,
   prepareMessages, readJsonEvents, sendWithPolicy,
 } from './common.js';
 
@@ -61,6 +61,7 @@ const CONTEXT_RE = /context_length|maximum context|context length|context window
 // "billing" alone is not enough: OpenAI's ordinary rate-limit text links to platform.openai.com/account/billing.
 const QUOTA_RE = /insufficient_quota|billing_hard_limit|(?<![/\w])billing(?![/\w])|exceeded your current quota|out of credits?|no credits?|payment required/;
 const REGION_RE = /unsupported_country|not available in your (country|region)|country, region, or territory/;
+const MEMORY_RE = /insufficient memory|failed to allocate|out of memory|requires more system memory|more memory than|cudamalloc|unable to allocate|not enough memory|std::bad_alloc|resource limitations/;
 const MODEL_MISSING_RE = /model_not_found|model.{0,80}(not found|does not exist|not exist|is not available)|unknown model|invalid model|no such model|try pulling it first|no endpoints found/;
 
 /**
@@ -95,11 +96,16 @@ export function mapOpenAIError({ status, text, headers, ctx }) {
     });
   }
   if (status === 413 || ([400, 422, 0, 200].includes(status) && CONTEXT_RE.test(hay))) {
+    // llama.cpp (and Ollama, which relays it) report both numbers: "request (6063 tokens) exceeds the available
+    // context size (4096 tokens)". Saying so tells the user which knob to turn.
+    const sizes = body.promptTokens && body.contextTokens
+      ? `The prompt needs about ${body.promptTokens} tokens but the model's context window holds ${body.contextTokens}. `
+      : '';
     return fail('context_too_long', 'This conversation is too long for the model.', {
       ...base,
       hint: local
-        ? 'Shorten the entry, lower the context budget in Settings, or raise the model\'s context size (Ollama: num_ctx; llama.cpp: --ctx-size).'
-        : 'Shorten the entry, lower the context budget in Settings, or choose a model with a longer context window.',
+        ? `${sizes}Shorten the entry, lower the context budget in Settings, or raise the model's context size (Ollama: set OLLAMA_CONTEXT_LENGTH, e.g. 8192, and restart it; llama.cpp: --ctx-size).`
+        : `${sizes}Shorten the entry, lower the context budget in Settings, or choose a model with a longer context window.`,
     });
   }
   if (status === 401 || status === 403) {
@@ -156,6 +162,17 @@ export function mapOpenAIError({ status, text, headers, ctx }) {
       hint: 'Check your plan and billing with the provider.',
     });
   }
+  if ((status >= 500 || status === 0) && MEMORY_RE.test(hay)) {
+    // Verified live (Ollama 0.40.1, a 131072-token window x 16 slots): HTTP 500 {"error":{"message":"llama-server process has
+    // terminated: exit status 1: ggml_aligned_malloc: insufficient memory (attempted to allocate 65536.00 MB) ... failed to
+    // allocate buffer for kv cache","type":"api_error"}}. The raw text is noise for a journal user; say what to do.
+    return fail('server', 'The model does not fit in this computer\'s memory.', {
+      ...base,
+      hint: local
+        ? 'Choose a smaller model (llama3.2:1b needs about 2 GB), or lower the context size (Ollama: OLLAMA_CONTEXT_LENGTH=4096, fewer OLLAMA_NUM_PARALLEL), close other programs, and try again.'
+        : 'The service ran out of memory for this request. Try again, or choose a smaller model.',
+    });
+  }
   if (status >= 500 || status === 0) {
     const loading = /loading model|model is loading|still loading/.test(hay);
     return fail(status === 529 ? 'overloaded' : 'server', `The model server had an internal problem${status ? ` (HTTP ${status})` : ''}.${heard}`, {
@@ -186,15 +203,15 @@ export function mapOpenAIError({ status, text, headers, ctx }) {
 // Self-healing
 
 function quirkSignature(q) {
-  return `${q.tokenParam}|${q.dropTemperature}|${q.dropStreamOptions}`;
+  return `${q.tokenParam}|${q.dropTemperature}|${q.dropStreamOptions}|${Boolean(q.dropReasoningEffort)}`;
 }
 
 /**
  * Decide how to rewrite a request after a 400. Returns the changed quirks, or null when the error text does
  * not point at a parameter we can adapt (so we never retry blindly).
- * @param {{tokenParam: string, dropTemperature: boolean, dropStreamOptions: boolean}} quirks
+ * @param {{tokenParam: string, dropTemperature: boolean, dropStreamOptions: boolean, dropReasoningEffort?: boolean}} quirks
  * @param {string} text raw 400 body
- * @param {{hasTemperature: boolean, hasTokens: boolean, hasStreamOptions: boolean}} used what the failed request contained
+ * @param {{hasTemperature: boolean, hasTokens: boolean, hasStreamOptions: boolean, hasReasoningEffort?: boolean}} used what the failed request contained
  */
 export function healQuirks(quirks, text, used) {
   const lower = String(text ?? '').toLowerCase();
@@ -205,6 +222,9 @@ export function healQuirks(quirks, text, used) {
   }
   if (used.hasTemperature && lower.includes('temperature')) next.dropTemperature = true;
   if (used.hasStreamOptions && lower.includes('stream_options')) next.dropStreamOptions = true;
+  // A server that knows the field but not our value ("does not support thinking") names `reasoning_effort`,
+  // `reasoning` or `think` in its text; any of them means: stop asking.
+  if (used.hasReasoningEffort && /reasoning|think/.test(lower)) next.dropReasoningEffort = true;
   return quirkSignature(next) === quirkSignature(quirks) ? null : next;
 }
 
@@ -217,6 +237,15 @@ function contentText(content) {
     return content.map((part) => (typeof part === 'string' ? part : part && typeof part.text === 'string' ? part.text : '')).join('');
   }
   return '';
+}
+
+/**
+ * llama.cpp's llama-server lists the model under the full path of the GGUF file it was started with
+ * ("/home/me/models/qwen3-1.7b-q4km.gguf", verified live); show the file name, keep the id as reported.
+ */
+function modelLabel(modelId) {
+  if (/\.gguf$/i.test(modelId) && /[\\/]/.test(modelId)) return modelId.split(/[\\/]/).pop() || modelId;
+  return modelId;
 }
 
 function parseModelIds(json) {
@@ -268,6 +297,8 @@ export function createOpenAIProvider(rawCfg, opts = {}) {
         tokenParam: host === 'api.openai.com' ? 'max_completion_tokens' : 'max_tokens',
         dropTemperature: false,
         dropStreamOptions: false,
+        // Only the local provider asks the model not to think (see buildBody); other services never see the field.
+        dropReasoningEffort: !local,
         ...(store.get(`${id}|${base}|${cfg.model}`) || {}),
       };
     }
@@ -391,6 +422,11 @@ export function createOpenAIProvider(rawCfg, opts = {}) {
     const maxTokens = req.maxTokens ?? (useDefaults ? cfg.maxTokens : undefined);
     if (Number.isFinite(maxTokens) && maxTokens > 0) body[q.tokenParam] = Math.floor(maxTokens);
     if (!q.dropStreamOptions) body.stream_options = { include_usage: true };
+    // A journaling reply should not start with seconds of hidden reasoning. Verified live: Ollama 0.40.1 and the
+    // llama.cpp server both honour `reasoning_effort: "none"` (qwen3:1.7b answers in ~1.7 s instead of 8-14 s, no
+    // token budget burnt on <think>) and ignore it for models that cannot think. A server that rejects it with a
+    // 400 is healed by dropping the field (healQuirks).
+    if (local && !q.dropReasoningEffort) body.reasoning_effort = 'none';
     return body;
   }
 
@@ -418,6 +454,8 @@ export function createOpenAIProvider(rawCfg, opts = {}) {
         scope,
         sleepFn,
         retryFallbackMs: opts.retryFallbackMs,
+        // The local provider also sends reasoning_effort, so a strict server may have one more parameter to refuse.
+        maxAdaptations: local ? MAX_ADAPTATIONS + 1 : MAX_ADAPTATIONS,
         buildInit: () => {
           lastBody = buildBody(messages, req, q, useDefaults);
           tried.add(quirkSignature(q));
@@ -429,6 +467,7 @@ export function createOpenAIProvider(rawCfg, opts = {}) {
             hasTemperature: 'temperature' in lastBody,
             hasTokens: q.tokenParam in lastBody,
             hasStreamOptions: 'stream_options' in lastBody,
+            hasReasoningEffort: 'reasoning_effort' in lastBody,
           });
           if (!next || tried.has(quirkSignature(next))) return false;
           Object.assign(q, next);
@@ -471,7 +510,7 @@ export function createOpenAIProvider(rawCfg, opts = {}) {
           hint: `${describeUrl(url)} did not return an OpenAI-style model list. The base URL normally ends in /v1; you can also type the model name by hand.`,
         });
       }
-      return ids.map((modelId) => ({ id: modelId, label: modelId }));
+      return ids.map((modelId) => ({ id: modelId, label: modelLabel(modelId) }));
     } finally {
       scope.close(true);
     }
@@ -555,6 +594,57 @@ export async function isOllama(cfgOrUrl, opts = {}) {
   }
 }
 
+// How Ollama words a failed download, in the NDJSON `{"error": "..."}` line (HTTP status 200, the stream just ends).
+// Verified live (0.40.1): every error starts with "pull model manifest: " even when the manifest request never got
+// an answer, e.g.  pull model manifest: Get "https://registry.ollama.ai/v2/library/x/manifests/3b": Forbidden  or
+// ...: proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused.  So "manifest" says nothing about the
+// model being unknown; only the registry's own "file does not exist" does (assumed from Ollama's source, the
+// registry is unreachable from the verification sandbox).
+const PULL_UNREACHABLE_RE = /\b(?:Get|Head|Post|Put) "https?:|dial tcp|lookup |no such host|connection (?:refused|reset)|i\/o timeout|timed? ?out|deadline exceeded|proxyconnect|forbidden|proxy|network is unreachable|temporary failure|x509|tls:|certificate|unexpected eof|\beof\b|server misbehaving|too many requests|\b(?:401|403|407|429|50[0-9])\b/i;
+const PULL_MISSING_RE = /file does not exist|manifest unknown|name unknown|repository does not exist/i;
+const PULL_MISSING_LOOSE_RE = /model not found|not found/i;
+
+/**
+ * Map the error text of a failed `/api/pull` onto a ProviderError: registry unreachable (network), unknown model,
+ * disk full, too-old Ollama, anything else (server).
+ * @param {string} rawMessage
+ * @param {string} model
+ * @param {string[]} secrets
+ */
+export function mapPullError(rawMessage, model, secrets = []) {
+  const fail = errorFactory('local', secrets);
+  const message = oneLine(redactSecrets(String(rawMessage ?? ''), secrets));
+  const name = oneLine(model, 80);
+  if (/no space left|disk quota|not enough space/i.test(message)) {
+    return fail('server', `Ollama ran out of disk space while downloading the model: ${message}`, {
+      detail: message,
+      hint: 'Free some disk space (models are 1-5 GB) or move the Ollama models folder (OLLAMA_MODELS), then try again.',
+    });
+  }
+  if (/newer version of ollama/i.test(message)) {
+    return fail('server', 'This model needs a newer version of Ollama.', {
+      detail: message,
+      hint: 'Update Ollama from ollama.com/download and try again.',
+    });
+  }
+  const missing = (detail) => fail('model_not_found', `Ollama has no model called "${name}".`, {
+    detail,
+    hint: 'Check the spelling against the list at ollama.com/library.',
+  });
+  if (PULL_MISSING_RE.test(message)) return missing(message);
+  if (PULL_UNREACHABLE_RE.test(message)) {
+    return fail('network', 'Ollama could not reach its model registry (registry.ollama.ai).', {
+      detail: message,
+      hint: `Check your internet connection (and proxy settings for Ollama), then try again. Without internet, load a model file you already have with \`ollama create\` (a GGUF file and a Modelfile) instead. Ollama said: ${oneLine(message, 220)}`,
+    });
+  }
+  if (PULL_MISSING_LOOSE_RE.test(message)) return missing(message);
+  return fail('server', `Ollama could not download the model: ${message || 'unknown error'}`, {
+    detail: message,
+    hint: 'Check free disk space and your internet connection, then try again.',
+  });
+}
+
 // Ollama names look like `llama3.2:3b` or `hf.co/user/repo:Q4_K_M`; no spaces, no path tricks.
 const MODEL_NAME_RE = /^(?!.*\.\.)(?!\/)[\w.:/@+-]{1,200}$/;
 
@@ -602,17 +692,7 @@ export async function* pullOllamaModel(cfgOrUrl, opts = {}) {
     for await (const line of iterateNdjson(readChunks(res, scope))) {
       if (!line || typeof line !== 'object') continue;
       if (line.error) {
-        const message = oneLine(typeof line.error === 'string' ? line.error : line.error.message || '');
-        if (/not exist|not found|manifest/i.test(message)) {
-          throw errorFactory('local', secrets)('model_not_found', `Ollama has no model called "${oneLine(model, 80)}".`, {
-            detail: message,
-            hint: 'Check the spelling against the list at ollama.com/library.',
-          });
-        }
-        throw errorFactory('local', secrets)('server', `Ollama could not download the model: ${message || 'unknown error'}`, {
-          detail: message,
-          hint: 'Check free disk space and your internet connection, then try again.',
-        });
+        throw mapPullError(typeof line.error === 'string' ? line.error : (line.error && line.error.message) || '', model, secrets);
       }
       const progress = { status: typeof line.status === 'string' ? line.status : '' };
       if (typeof line.digest === 'string') progress.digest = line.digest;

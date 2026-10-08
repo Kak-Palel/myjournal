@@ -3,6 +3,7 @@ import { h, mount } from './lib/dom.js';
 import { api, ApiError } from './lib/api.js';
 import { createRouter, parseHash } from './lib/router.js';
 import { icon, toast, spinner, todayString } from './lib/ui.js';
+import { createConnectionMonitor, createConnectionBanner, probeHealth } from './components/connection.js';
 
 const routes = [
   { path: '/', load: () => import('./views/today.js'), nav: 'today', title: 'Today' },
@@ -27,6 +28,7 @@ const PROVIDER_LABELS = { gemini: 'Gemini', openai: 'OpenAI-compatible', local: 
 
 /* ------------------------------------------------------------------- app */
 const listeners = new Map();
+const pendingSaves = new Set();
 let router = null;
 let catalogCache = null;
 
@@ -52,11 +54,20 @@ export const app = {
   },
 
   /** Partial update (see ARCHITECTURE §5). Resolves with the new public settings; throws ApiError. */
-  async saveSettings(patch) {
-    app.settings = await api.put('/settings', patch);
-    app.emit('settings', app.settings);
-    return app.settings;
+  saveSettings(patch) {
+    const run = api.put('/settings', patch).then((saved) => {
+      app.settings = saved;
+      app.emit('settings', app.settings);
+      return app.settings;
+    });
+    const tracked = run.then(() => {}, () => {}).then(() => { pendingSaves.delete(tracked); });
+    pendingSaves.add(tracked);
+    return run;
   },
+  /** Is a settings save on its way to the server (and not yet answered)? */
+  savesInFlight() { return pendingSaves.size > 0; },
+  /** Resolves once every settings save that is on its way has been answered, successfully or not. */
+  savesSettled() { return Promise.all([...pendingSaves]).then(() => {}); },
 
   navigate(path, opts) { router.navigate(path, opts); },
   toast,
@@ -87,9 +98,16 @@ const THEMES = ['auto', 'light', 'dark'];
 function currentTheme() {
   try { return localStorage.getItem('mj-theme') || 'auto'; } catch { return 'auto'; }
 }
+const THEME_COLORS = { light: '#faf7f2', dark: '#171614' }; // = --bg in base.css
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem('mj-theme', theme); } catch { /* private mode */ }
+  // Browser chrome (the address bar on a phone): an explicit choice wins, Auto hands it back to the system setting.
+  const wanted = { light: THEME_COLORS.light, dark: THEME_COLORS.dark };
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]')) {
+    const scheme = /dark/.test(meta.media || '') ? 'dark' : 'light';
+    meta.setAttribute('content', theme === 'auto' ? THEME_COLORS[scheme] : wanted[theme]);
+  }
 }
 export function setTheme(theme) { applyTheme(THEMES.includes(theme) ? theme : 'auto'); app.emit('theme', theme); }
 export function getTheme() { return currentTheme(); }
@@ -110,7 +128,8 @@ function buildShell() {
   );
   const tabbar = h('nav', { class: 'tabbar', 'aria-label': 'Main' }, tabs);
   const skip = h('a', { class: 'skip-link', href: '#view', onClick: (e) => { e.preventDefault(); view.focus(); } }, 'Skip to content');
-  const shell = h('div', { class: 'shell' }, skip, sidebar, view, tabbar);
+  const connHost = h('div', { class: 'conn-host' });
+  const shell = h('div', { class: 'shell' }, skip, connHost, sidebar, view, tabbar);
 
   function paintPill() {
     const ai = app.settings && app.settings.ai;
@@ -148,7 +167,44 @@ function buildShell() {
       if (on) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
     }
   }
-  return { shell, view, setActive };
+  return { shell, view, setActive, connHost };
+}
+
+/* ------------------------------------------------------- server connection */
+/**
+ * One calm banner while the server is unreachable (instead of every view failing on its own), automatic re-checks with a
+ * growing pause, and, once the server answers again, a retry of every view-level "Try again" that was waiting for it.
+ */
+function watchConnection({ shell, view, connHost }) {
+  let banner = null;
+  const monitor = createConnectionMonitor({
+    probe: () => probeHealth(),
+    onChange(state) {
+      if (state.status === 'online') {
+        banner = null;
+        connHost.replaceChildren();
+        shell.classList.remove('has-conn');
+        document.documentElement.style.removeProperty('--conn-h');
+        return;
+      }
+      if (!banner) {
+        banner = createConnectionBanner({ onRetry: () => monitor.checkNow() });
+        connHost.replaceChildren(banner.el);
+        shell.classList.add('has-conn');
+        requestAnimationFrame(() => document.documentElement.style.setProperty('--conn-h', `${connHost.offsetHeight}px`));
+      }
+      banner.update(state);
+    },
+    onRecovered() {
+      toast('Connected again.', { kind: 'success', timeout: 2500 });
+      for (const button of view.querySelectorAll('[data-auto-retry]')) button.click();
+    },
+  });
+  window.addEventListener('myjournal:offline', () => monitor.suspect());
+  window.addEventListener('myjournal:online', () => monitor.reachable());
+  window.addEventListener('online', () => monitor.checkNow());
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) monitor.checkNow(); });
+  return monitor;
 }
 
 /* ------------------------------------------------------------------ boot */
@@ -170,7 +226,8 @@ async function boot() {
     return;
   }
 
-  const { shell, view, setActive } = buildShell();
+  const { shell, view, setActive, connHost } = buildShell();
+  watchConnection({ shell, view, connHost });
 
   router = createRouter({
     routes: routes.map(({ path, load }) => ({ path, load })),
@@ -187,19 +244,26 @@ async function boot() {
   });
 
   window.addEventListener('myjournal:unauthorized', () => {
-    if (!location.hash.startsWith('#/login')) router.navigate('/login', { replace: true });
+    if (!location.hash.startsWith('#/login')) router.navigate('/login', { replace: true }); // signing in again starts at Today
   });
 
   mount(rootEl, shell);
 
   if (auth.required && !auth.authenticated) {
-    // Show the login view; startAuthenticated() runs once the login view succeeds.
-    await router.start();
-    if (parseHash().path !== '/login') router.navigate('/login', { replace: true });
+    // Go to the sign-in page BEFORE the router resolves anything: the page that was asked for would otherwise render
+    // first, fail its API calls with 401 and only then be replaced. After signing in the person lands where they were headed.
+    if (parseHash().path !== '/login') {
+      intendedHash = location.hash;
+      history.replaceState(null, '', '#/login');
+    }
+    await router.start(); // startAuthenticated() runs once the login view succeeds
     return;
   }
   await startAuthenticated();
 }
+
+/** The address that was asked for when the page was opened while the journal was locked ('' = nothing special). */
+let intendedHash = '';
 
 /** Called at boot (when allowed in) and again by the login view after a successful login. */
 export async function startAuthenticated() {
@@ -209,11 +273,12 @@ export async function startAuthenticated() {
     if (err instanceof ApiError && err.code === 'unauthorized') return;
     toast(err.message || 'Could not load settings', { kind: 'error' });
   }
-  let { path } = parseHash();
-  if (path === '/login') path = '/';
-  const needsOnboarding = app.settings && !app.settings.onboarded && path === '/';
-  if (needsOnboarding) path = '/welcome';
-  if (path !== parseHash().path) history.replaceState(null, '', `#${path}`);
+  let target = null; // a replacement address, when the current one is not where the person should land
+  if (parseHash().path === '/login') target = intendedHash && !intendedHash.startsWith('#/login') ? intendedHash : '#/';
+  intendedHash = '';
+  const path = target ? parseHash(target).path : parseHash().path;
+  if (app.settings && !app.settings.onboarded && path === '/') target = '#/welcome';
+  if (target) history.replaceState(null, '', target);
   await router.start(); // idempotent: registers the hashchange listener once, then resolves the route
 }
 

@@ -230,14 +230,20 @@ test('mock-openai: error injection returns the documented statuses and bodies', 
   });
 });
 
-test('mock-openai: error body flavours (openai object, ollama string, llama.cpp numeric code)', async () => {
+test('mock-openai: error body flavours (openai object, ollama /v1 object, ollama native string, llama.cpp numeric code)', async () => {
   await withOpenAI({ failures: [{ kind: 'model_not_found', model: 'x:1b' }], errorStyle: 'ollama' }, async (mock) => {
+    // Verified live (Ollama 0.40.1): /v1 errors are OpenAI-shaped, with Ollama's own type and null param / code.
+    assert.deepEqual(await (await chat(mock, {})).json(), { error: { message: "model 'x:1b' not found", type: 'not_found_error', param: null, code: null } });
+  });
+  await withOpenAI({ failures: [{ kind: 'model_not_found', model: 'x:1b' }], errorStyle: 'ollama-native' }, async (mock) => {
+    // The native /api/* endpoints answer {"error": "text"}.
     assert.deepEqual(await (await chat(mock, {})).json(), { error: "model 'x:1b' not found" });
   });
   await withOpenAI({ failures: ['unauthorized'], errorStyle: 'llamacpp' }, async (mock) => {
     const body = await (await chat(mock, {})).json();
     assert.equal(body.error.code, 401);
     assert.equal(typeof body.error.message, 'string');
+    assert.equal(body.error.type, 'authentication_error');
   });
 });
 

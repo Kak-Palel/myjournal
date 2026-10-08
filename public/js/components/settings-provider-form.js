@@ -7,7 +7,7 @@
 //   * "Test connection" and "Load models" send the *unsaved* form as an overlay so people can try first.
 import { h, mount } from '../lib/dom.js';
 import { api, ApiError } from '../lib/api.js';
-import { icon, toast, confirmDialog } from '../lib/ui.js';
+import { icon, toast, confirmDialog, inlineCode, stripCode } from '../lib/ui.js';
 import {
   buildProviderPatch, providerChanges, overlayConfig, connectionKey, mapProviderErrors, keyStatus, filterModels, mergeModelOptions,
   matchPreset, PRESET_HINTS, FALLBACK_PRESETS, nextSteps, hostKind, formatLatency, PROVIDER_NAMES,
@@ -390,7 +390,7 @@ export function createProviderForm({ info, app, signal, onChange, onSaved }) {
     summaryEl.hidden = false;
     mount(summaryEl, notice({
       tone: 'error', role: 'alert',
-      children: [h('strong', null, err.message || 'Some settings need another look'), err.hint ? h('p', { class: 'muted' }, err.hint) : null,
+      children: [h('strong', null, err.message || 'Some settings need another look'), err.hint ? h('p', { class: 'muted' }, inlineCode(err.hint)) : null,
         extra.length ? h('ul', { class: 'settings-error-list' }, extra.map((t) => h('li', null, t))) : null],
     }));
     if (!focusFirstInvalid(form)) summaryEl.scrollIntoView({ block: 'nearest' });
@@ -409,7 +409,7 @@ export function createProviderForm({ info, app, signal, onChange, onSaved }) {
       if (err instanceof ApiError && err.fields) showSaveErrors(err);
       else {
         summaryEl.hidden = false;
-        mount(summaryEl, notice({ tone: 'error', role: 'alert', children: [h('strong', null, err.message || 'Could not save'), err.hint ? h('p', { class: 'muted' }, err.hint) : null] }));
+        mount(summaryEl, notice({ tone: 'error', role: 'alert', children: [h('strong', null, err.message || 'Could not save'), err.hint ? h('p', { class: 'muted' }, inlineCode(err.hint)) : null] }));
       }
       return false;
     }
@@ -482,7 +482,7 @@ export function createProviderForm({ info, app, signal, onChange, onSaved }) {
     loadedStatus.hidden = false;
     loadedStatus.classList.add('is-error');
     const message = clip((err && err.message) || 'Could not load the model list.');
-    mount(loadedStatus, icon('alert', { size: 14 }), ` ${message}`, err && err.hint ? ` ${clip(err.hint)}` : '');
+    mount(loadedStatus, icon('alert', { size: 14 }), ` ${stripCode(message)}`, err && err.hint ? ` ${stripCode(clip(err.hint))}` : '');
   }
 
   function keyMissing() {
@@ -537,8 +537,8 @@ export function createProviderForm({ info, app, signal, onChange, onSaved }) {
     mount(resultEl, card(notice({
       tone: 'error', role: 'alert',
       children: [
-        h('strong', null, clip(err.message) || 'The connection test failed'),
-        err.hint ? h('p', null, clip(err.hint)) : null,
+        h('strong', null, inlineCode(clip(err.message) || 'The connection test failed')),
+        err.hint ? h('p', null, inlineCode(clip(err.hint))) : null,
         steps.length
           ? h('div', { class: 'settings-steps-box' },
             h('p', { class: 'settings-steps-title' }, 'Things to try'),

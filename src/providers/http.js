@@ -239,8 +239,11 @@ function timeoutError(kind, ctx, ms) {
     });
   }
   return fail('timeout', `${who} did not answer within ${secs} ${unit}.`, {
+    // Verified live (Ollama 0.40.1): when the client gives up while the model is still loading, Ollama cancels the load
+    // ("client connection closed before llama-server finished loading, aborting load"), so an immediate retry starts
+    // the whole load again. Raising the timeout is the fix, not retrying.
     hint: local
-      ? 'The first request after starting a model loads it into memory and can be slow. Try again, or raise the timeout in Settings.'
+      ? 'The first request after starting a model loads it into memory, which can take a while, and giving up cancels that load. Raise the timeout in Settings (Settings > General), then try again.'
       : 'Try again in a moment, or raise the timeout in Settings.',
   });
 }
@@ -426,14 +429,29 @@ export async function readErrorBody(response, scope) {
   }
 }
 
+/** `{"error":{"message": "...", ...}}` or `{"message": "..."}` -> that object's message, else ''. Used to unwrap nested errors. */
+function innerErrorMessage(obj) {
+  if (!obj || typeof obj !== 'object') return '';
+  const err = obj.error;
+  if (typeof err === 'string') return err;
+  if (err && typeof err === 'object' && typeof err.message === 'string') return err.message;
+  return typeof obj.message === 'string' ? obj.message : '';
+}
+
 /**
  * Best-effort parse of an error body in any of the shapes seen in the wild.
+ *
+ * Verified live (Ollama 0.40.1): when its llama.cpp runner rejects a prompt, Ollama wraps the runner's JSON error
+ * inside its own `error.message` STRING (`{"error":{"message":"{\"error\":{\"code\":400,\"message\":\"request (6063
+ * tokens) exceeds the available context size (4096 tokens)...\",\"n_prompt_tokens\":6063,\"n_ctx\":4096}}"}}`), so a
+ * message that is itself a JSON error document is unwrapped. `promptTokens` / `contextTokens` are filled from
+ * llama.cpp's `n_prompt_tokens` / `n_ctx` fields when present (0 otherwise).
  * @param {string} text
- * @returns {{json: any, message: string, code: string, type: string, status: string, html: boolean}}
+ * @returns {{json: any, message: string, code: string, type: string, status: string, html: boolean, promptTokens: number, contextTokens: number}}
  */
 export function parseErrorBody(text) {
   const raw = String(text ?? '').trim();
-  const out = { json: null, message: '', code: '', type: '', status: '', html: false };
+  const out = { json: null, message: '', code: '', type: '', status: '', html: false, promptTokens: 0, contextTokens: 0 };
   if (!raw) return out;
   if (/^<(!doctype|html|head|body)/i.test(raw)) {
     out.html = true;
@@ -447,6 +465,7 @@ export function parseErrorBody(text) {
   }
   out.json = json;
   const err = json.error;
+  const count = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : 0);
   if (typeof err === 'string') {
     out.message = err;
   } else if (err && typeof err === 'object') {
@@ -454,6 +473,8 @@ export function parseErrorBody(text) {
     out.code = err.code === undefined || err.code === null ? '' : String(err.code);
     out.type = typeof err.type === 'string' ? err.type : '';
     out.status = typeof err.status === 'string' ? err.status : '';
+    out.promptTokens = count(err.n_prompt_tokens);
+    out.contextTokens = count(err.n_ctx);
   } else if (typeof json.message === 'string') {
     out.message = json.message;
   } else if (typeof json.detail === 'string') {
@@ -462,6 +483,20 @@ export function parseErrorBody(text) {
     out.message = json.detail[0].msg;
   } else if (typeof json.error_description === 'string') {
     out.message = json.error_description;
+  }
+  // Ollama wraps the runner's JSON error document in its own message string; unwrap one level.
+  if (/^\s*\{/.test(out.message)) {
+    let nested = null;
+    try { nested = JSON.parse(out.message); } catch { /* not JSON after all: keep the text */ }
+    const inner = innerErrorMessage(nested);
+    if (inner) {
+      const e = nested.error && typeof nested.error === 'object' ? nested.error : {};
+      out.message = inner;
+      out.promptTokens = out.promptTokens || count(e.n_prompt_tokens);
+      out.contextTokens = out.contextTokens || count(e.n_ctx);
+      if (!out.type && typeof e.type === 'string') out.type = e.type;
+      if (!out.code && e.code !== undefined && e.code !== null) out.code = String(e.code);
+    }
   }
   out.message = oneLine(out.message);
   return out;

@@ -3,6 +3,7 @@
 // a superseded request are ignored, so fast typing can never show stale results.
 import { h, mount } from '../lib/dom.js';
 import { api } from '../lib/api.js';
+import { replaceHash } from '../lib/router.js';
 import { icon, emptyState, skeleton, showError, formatMonth, todayString } from '../lib/ui.js';
 import { createFilters } from '../components/history-filters.js';
 import { renderEntryCard } from '../components/history-card.js';
@@ -11,6 +12,10 @@ import {
 } from '../components/history-format.js';
 
 const PAGE_SIZE = 30;
+const MAX_REQUEST = 200; // the server's largest page
+
+/** How many cards were on screen when the person left (and for which filters), so Back can bring them all back. */
+let lastDepth = null;
 
 function listSkeleton() {
   return h('div', { class: 'hist-skeleton', 'aria-hidden': 'true' },
@@ -18,7 +23,7 @@ function listSkeleton() {
 }
 
 export default async function historyView(ctx) {
-  const { root, query, signal, app } = ctx;
+  const { root, query, signal, app, restoring } = ctx;
   let filters = parseFilters(query);
   let nextBefore = null;
   let token = 0;
@@ -53,14 +58,16 @@ export default async function historyView(ctx) {
     loadedCount = 0;
   }
 
+  /** Add cards to the list; returns the first new card (so "Load more" can hand keyboard focus to it). */
   function appendCards(entries) {
     const terms = searching() ? searchTerms(filters.q) : [];
-    const card = (e) => renderEntryCard(e, { terms, onTag: filterByTag });
+    const made = [];
+    const card = (e) => { const el = renderEntryCard(e, { terms, onTag: filterByTag }); made.push(el); return el; };
 
     if (searching()) { // ranked results: month grouping would scramble the ranking
       if (!flatList) { flatList = h('ul', { class: 'hist-list' }); resultsEl.replaceChildren(flatList); }
       flatList.append(...entries.map(card));
-      return;
+      return made[0] || null;
     }
     if (resultsEl.querySelector('.hist-skeleton, .empty, .notice')) resultsEl.replaceChildren();
     for (const group of groupByMonth(entries, lastKey)) {
@@ -74,11 +81,13 @@ export default async function historyView(ctx) {
       }
       lastKey = group.key;
     }
+    return made[0] || null;
   }
 
   function renderEmpty() {
     if (hasActiveFilters(filters)) {
       resultsEl.replaceChildren(emptyState({
+        level: 2,
         icon: 'search',
         title: searching() ? `Nothing matches “${filters.q.trim()}”` : 'No entries match these filters',
         body: 'Try different words, or clear the filters to see everything.',
@@ -86,6 +95,7 @@ export default async function historyView(ctx) {
       }));
     } else {
       resultsEl.replaceChildren(emptyState({
+        level: 2,
         icon: 'book',
         title: 'Your journal is waiting',
         body: 'Entries you write show up here, grouped by month. Nothing leaves this computer unless you connect an AI.',
@@ -94,9 +104,19 @@ export default async function historyView(ctx) {
     }
   }
 
+  let loadingMore = false;
   function paintMore(loading = false) {
+    loadingMore = loading;
+    const existing = moreWrap.querySelector('.hist-more-btn');
+    if (existing && nextBefore !== null) {
+      // Same button, new label: it keeps keyboard focus (a disabled or replaced button would drop it).
+      existing.textContent = loading ? 'Loading…' : 'Load more';
+      existing.classList.toggle('is-loading', loading);
+      existing.setAttribute('aria-busy', loading ? 'true' : 'false');
+      return;
+    }
     moreWrap.replaceChildren(...(nextBefore !== null
-      ? [h('button', { type: 'button', class: 'btn hist-more-btn', disabled: loading, onClick: () => load({ append: true }) }, loading ? 'Loading…' : 'Load more')]
+      ? [h('button', { type: 'button', class: 'btn hist-more-btn', onClick: () => { if (!loadingMore) load({ append: true }); } }, loading ? 'Loading…' : 'Load more')]
       : []));
   }
 
@@ -110,7 +130,7 @@ export default async function historyView(ctx) {
   }
 
   /* --------------------------------------------------------------- loading */
-  async function load({ append = false } = {}) {
+  async function load({ append = false, limit = PAGE_SIZE, quiet = false } = {}) {
     if (controller) controller.abort();
     const ctl = new AbortController();
     controller = ctl;
@@ -118,6 +138,8 @@ export default async function historyView(ctx) {
     signal.addEventListener('abort', onNav, { once: true });
     const mine = ++token;
 
+    // "Load more" was pressed: once the new cards are in, keyboard focus moves to the first of them instead of being lost.
+    const handFocusOn = append && moreWrap.contains(document.activeElement);
     if (append) {
       paintMore(true);
     } else {
@@ -129,7 +151,7 @@ export default async function historyView(ctx) {
     }
 
     try {
-      const res = await api.get(listPath(filters, { before: append ? nextBefore : null, limit: PAGE_SIZE }), { signal: ctl.signal });
+      const res = await api.get(listPath(filters, { before: append ? nextBefore : null, limit }), { signal: ctl.signal });
       if (mine !== token || disposed) return;
       const entries = res.entries || [];
       nextBefore = res.nextBefore ?? null;
@@ -139,11 +161,16 @@ export default async function historyView(ctx) {
         status.textContent = searching() ? 'No results.' : 'No entries.';
         return;
       }
-      appendCards(entries);
+      const firstNew = appendCards(entries);
       loadedCount += entries.length;
       paintCount();
       paintMore();
-      if (append) status.textContent = `Loaded ${entries.length} more ${entries.length === 1 ? 'entry' : 'entries'}.`;
+      if (handFocusOn && firstNew) {
+        const link = firstNew.querySelector('.hcard-link');
+        if (link) link.focus({ preventScroll: true });
+      }
+      if (append && quiet) status.textContent = '';
+      else if (append) status.textContent = `Loaded ${entries.length} more ${entries.length === 1 ? 'entry' : 'entries'}.`;
       else if (searching()) status.textContent = `${entries.length} ${entries.length === 1 ? 'result' : 'results'}.`;
     } catch (err) {
       if (mine !== token || disposed || (err && err.name === 'AbortError')) return;
@@ -161,7 +188,7 @@ export default async function historyView(ctx) {
 
   function syncUrl() {
     const qs = filtersToParams(filters).toString();
-    history.replaceState(null, '', `#/history${qs ? `?${qs}` : ''}`);
+    replaceHash(`#/history${qs ? `?${qs}` : ''}`);
   }
 
   function onFilters(next) {
@@ -188,7 +215,15 @@ export default async function historyView(ctx) {
   }
   document.addEventListener('keydown', onKey);
 
-  load();
+  const filtersKey = () => filtersToParams(filters).toString();
+  /** Back / Forward: bring back as many cards as were on screen before, so the scroll position means the same place. */
+  async function loadAsDeepAs(target) {
+    while (!disposed && nextBefore !== null && loadedCount < target) {
+      await load({ append: true, limit: Math.min(MAX_REQUEST, target - loadedCount), quiet: true });
+    }
+  }
+  const wanted = restoring && lastDepth && lastDepth.key === filtersKey() ? lastDepth.count : 0;
+  load({ limit: Math.min(MAX_REQUEST, Math.max(PAGE_SIZE, wanted)) }).then(() => { if (wanted > loadedCount) return loadAsDeepAs(wanted); return undefined; });
 
   // Tag choices: the most used tags of all time (the overview endpoint returns the top ten).
   api.get(`/insights/overview?today=${todayString()}&days=3650`, { signal }).then((overview) => {
@@ -197,6 +232,7 @@ export default async function historyView(ctx) {
 
   return function cleanup() {
     disposed = true;
+    lastDepth = { key: filtersKey(), count: loadedCount };
     token += 1;
     if (controller) controller.abort();
     document.removeEventListener('keydown', onKey);

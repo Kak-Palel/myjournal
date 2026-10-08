@@ -10,6 +10,20 @@
 // writes that are sliced at arbitrary byte offsets (inside multi-byte UTF-8 characters, between CR and LF).
 // Both `/v1/...` and bare `/...` paths are served. See `DEFAULTS` for every option; change any of them
 // at runtime with `mock.setBehavior({...})`.
+//
+// `flavor: 'ollama' | 'llamacpp'` makes the mock behave like the REAL servers, byte for byte where it matters. Every
+// quirk below was captured live (2026-10-08, Ollama 0.40.1 and llama.cpp commit 631109b34; raw captures in
+// test/fixtures/ollama-live and test/fixtures/llamacpp-live):
+//   ollama   - NO role-only first chunk: the first delta is `{role, content: "<first token>"}`; reasoning arrives as
+//              `delta.reasoning` next to `content: ""`; deltas are never empty; the usage chunk has `choices: []`, a
+//              `prompt_tokens_details` block and a `timings` block; `max_completion_tokens` is ignored; errors are
+//              `{error:{message,type,param,code}}` (model: 404 `model 'x' not found`, type not_found_error); a prompt
+//              over the context window (`numCtx`) is trimmed message by message (system + latest kept) and a single
+//              message that alone is too big is a 400 whose message is a JSON string; unknown paths are plain-text
+//              `404 page not found`; GET on the chat path is 405; `/api/pull` hits the registry even for models you
+//              have (see `pull.unreachable`); /v1/models lists newest first with owned_by "library".
+//   llamacpp - first delta is `{role, content: null}`; reasoning arrives as `delta.reasoning_content`; any model name
+//              is accepted; the model id is the GGUF path; errors `{error:{code,message,type}}`; `GET /health`.
 
 import { allUserText, respond, splitIntoDeltas } from './mock-responder.js';
 import { sendJson, sendText, startMockServer } from './mock-server.js';
@@ -41,15 +55,21 @@ export const DEFAULTS = Object.freeze({
   omitDone: false,
   /** Text for a `<think>` block put in front of every reply (true => a default thought). */
   think: false,
-  /** Text sent as `delta.reasoning_content` before the answer (true => a default thought). */
+  /** Text sent as a separate reasoning field before the answer (true => a default thought). */
   reasoningContent: false,
+  /** Name of that field: 'reasoning_content' (DeepSeek, llama.cpp, vLLM) or 'reasoning' (Ollama). */
+  reasoningField: 'reasoning_content',
+  /** Which real server to imitate: 'openai' (generic) | 'ollama' | 'llamacpp'. Applies FLAVORS[flavor] under explicit options. */
+  flavor: 'openai',
+  /** Context window in (estimated) tokens; 0 = unlimited. Only the 'ollama' and 'llamacpp' flavors enforce it. */
+  numCtx: 0,
   /** 'requested' (only with stream_options.include_usage, like OpenAI) | 'always' | 'never'. */
   usage: 'requested',
   /** Models listed by GET /models and /api/tags. */
   models: ['llama3.2:3b', 'mock-model', 'gpt-4o-mini'],
   /** When true, chat requests for a model not in `models` get a 404 model-not-found. */
   strictModel: false,
-  /** Error body flavour: 'openai' | 'ollama' (string error) | 'llamacpp'. */
+  /** Error body flavour: 'openai' | 'ollama' (real /v1 shape) | 'ollama-native' (`{error: "text"}`, as /api/* answers) | 'llamacpp'. */
   errorStyle: 'openai',
   /** Required bearer token (string or array). Unset => no auth. */
   apiKey: undefined,
@@ -59,14 +79,31 @@ export const DEFAULTS = Object.freeze({
   failures: [],
   /** Same shapes as `failures` but for GET /models. */
   modelsFailures: [],
-  /** GET /models body flavour: 'openai' | 'llamacpp' | 'array' | 'models-key'. */
+  /** GET /models body flavour: 'openai' | 'ollama' | 'llamacpp' | 'array' | 'models-key'. */
   modelsStyle: 'openai',
   /** Serve the Ollama endpoints (/api/version, /api/tags, /api/pull). */
   ollama: true,
   ollamaVersion: '0.5.7-mock',
   /** Ollama pull behaviour. */
-  pull: { delayMs: 0, steps: 4, fail: false, failMidway: false, truncate: false },
+  pull: { delayMs: 0, steps: 4, fail: false, failMidway: false, truncate: false, unreachable: false },
 });
+
+/** Defaults a flavor applies below explicit options (see the header comment). */
+export const FLAVORS = Object.freeze({
+  openai: Object.freeze({}),
+  ollama: Object.freeze({
+    errorStyle: 'ollama', modelsStyle: 'ollama', emptyDeltas: false, reasoningField: 'reasoning', ollama: true,
+    ollamaVersion: '0.40.1', strictModel: true, models: ['qwen3:1.7b', 'llama3.2:1b', 'smollm2:360m'],
+  }),
+  llamacpp: Object.freeze({
+    errorStyle: 'llamacpp', modelsStyle: 'llamacpp', emptyDeltas: false, reasoningField: 'reasoning_content', ollama: false,
+    strictModel: false, models: ['/models/qwen3-1.7b-q4km.gguf'],
+  }),
+});
+
+const FINGERPRINT = { ollama: 'fp_ollama', llamacpp: 'b1-631109b34' };
+const randomId = (n) => Array.from({ length: n }, () => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 62)]).join('');
+const chatId = (flavor) => (flavor === 'llamacpp' ? `chatcmpl-${randomId(32)}` : flavor === 'ollama' ? `chatcmpl-${Math.floor(Math.random() * 1000)}` : `chatcmpl-mock${Date.now().toString(36)}`);
 
 const DEFAULT_THOUGHT = 'The user wants a short answer. Let me consider what to say. I should be kind.';
 
@@ -76,7 +113,9 @@ function matches(value, candidates) {
 
 /** Error body in the configured flavour. */
 export function errorBody(style, { message, type = 'invalid_request_error', code = null, param = null, status = 400 }) {
-  if (style === 'ollama') return { error: message };
+  if (style === 'ollama-native') return { error: message };
+  // Ollama's /v1 shape (verified live): always param: null / code: null, and its own type names.
+  if (style === 'ollama') return { error: { message, type: type === 'invalid_request_error' && status === 404 ? 'not_found_error' : type, param: null, code: null } };
   if (style === 'llamacpp') return { error: { code: status, message, type } };
   return { error: { message, type, param, code } };
 }
@@ -142,6 +181,8 @@ function failureHttp(spec, behavior, ctx) {
   const model = spec.model || (ctx.body && ctx.body.model) || 'mock-model';
   switch (spec.kind) {
     case 'unauthorized':
+      // llama-server --api-key (verified live): {"error":{"message":"Invalid API Key","type":"authentication_error","code":401}}
+      if (style === 'llamacpp') return { status: 401, body: { error: { message: 'Invalid API Key', type: 'authentication_error', code: 401 } } };
       return { status: 401, body: errorBody(style, { message: 'Incorrect API key provided: sk-mock***. You can find your API key at https://platform.openai.com/account/api-keys.', type: 'invalid_request_error', code: 'invalid_api_key', status: 401 }) };
     case 'echo_key': {
       // A hostile/buggy server that reflects the credential it received back in the error text.
@@ -151,10 +192,13 @@ function failureHttp(spec, behavior, ctx) {
     case 'forbidden':
       return { status: 403, body: errorBody(style, { message: 'You do not have access to this resource.', type: 'permission_error', code: 'forbidden', status: 403 }) };
     case 'model_not_found':
-      if (style === 'ollama') return { status: 404, body: { error: `model '${model}' not found` } };
+      if (style === 'ollama-native') return { status: 404, body: { error: `model '${model}' not found` } };
+      if (style === 'ollama') return { status: 404, body: { error: { message: `model '${model}' not found`, type: 'not_found_error', param: null, code: null } } };
       if (style === 'llamacpp') return { status: 404, body: errorBody(style, { message: `model '${model}' not found`, type: 'not_found_error', status: 404 }) };
       return { status: 404, body: errorBody(style, { message: `The model \`${model}\` does not exist or you do not have access to it.`, type: 'invalid_request_error', code: 'model_not_found', status: 404 }) };
     case 'not_found':
+      // Ollama / Go's default mux: plain text. llama-server: a JSON error document.
+      if (style === 'llamacpp') return { status: 404, body: { error: { message: 'File Not Found', type: 'not_found_error', code: 404 } } };
       return { status: 404, text: '404 page not found' };
     case 'rate_limit':
       return {
@@ -165,6 +209,11 @@ function failureHttp(spec, behavior, ctx) {
     case 'quota':
       return { status: 429, body: errorBody(style, { message: 'You exceeded your current quota, please check your plan and billing details.', type: 'insufficient_quota', code: 'insufficient_quota', status: 429 }) };
     case 'context_length':
+      if (style === 'ollama') {
+        // Verified live: Ollama relays the runner's JSON error document inside its own message STRING.
+        const inner = { error: { code: 400, message: 'request (6063 tokens) exceeds the available context size (4096 tokens), try increasing it', type: 'exceed_context_size_error', n_prompt_tokens: 6063, n_ctx: 4096 } };
+        return { status: 400, body: { error: { message: JSON.stringify(inner), type: 'invalid_request_error', param: null, code: null } } };
+      }
       if (style === 'llamacpp') return { status: 400, body: { error: { code: 400, message: 'the request exceeds the available context size, try increasing it', type: 'exceed_context_size_error', n_prompt_tokens: 9000, n_ctx: 4096 } } };
       return { status: 400, body: errorBody(style, { message: "This model's maximum context length is 4096 tokens. However, you requested 9000 tokens (8500 in the messages, 500 in the completion). Please reduce the length of the messages or completion.", code: 'context_length_exceeded', status: 400 }) };
     case 'bad_request':
@@ -207,38 +256,86 @@ function frameWriter(behavior) {
   };
 }
 
+/** One `chat.completion.chunk` object in the byte layout of the imitated server. */
+function chunkObject(flavor, { id, created, model, delta, finish }) {
+  if (flavor === 'ollama') {
+    return { id, object: 'chat.completion.chunk', created, model, system_fingerprint: FINGERPRINT.ollama, choices: [{ index: 0, delta, finish_reason: finish }] };
+  }
+  if (flavor === 'llamacpp') {
+    return { choices: [{ finish_reason: finish, index: 0, delta }], created, id, model, system_fingerprint: FINGERPRINT.llamacpp, object: 'chat.completion.chunk' };
+  }
+  return { id, object: 'chat.completion.chunk', created, model, system_fingerprint: 'fp_mock', choices: [{ index: 0, delta, logprobs: null, finish_reason: finish }] };
+}
+
 function buildChunks(reply, body, behavior) {
-  const id = `chatcmpl-mock${Date.now().toString(36)}`;
+  const flavor = behavior.flavor;
+  const id = chatId(flavor);
   const created = Math.floor(Date.now() / 1000);
   const model = (body && body.model) || 'mock-model';
-  const base = (delta, finish = null) => ({
-    id, object: 'chat.completion.chunk', created, model, system_fingerprint: 'fp_mock',
-    choices: [{ index: 0, delta, logprobs: null, finish_reason: finish }],
-  });
+  const base = (delta, finish = null) => chunkObject(flavor, { id, created, model: flavor === 'llamacpp' ? behavior.models[0] : model, delta, finish });
   const thought = reply.think ?? behavior.think;
   const thinkText = thought ? `<think>${thought === true ? DEFAULT_THOUGHT : thought}</think>\n\n` : '';
   const reasoning = reply.reasoningContent ?? behavior.reasoningContent;
   const text = reply.thinkOnly ? `<think>${DEFAULT_THOUGHT}` : `${thinkText}${reply.text}`;
-  const frames = [];
-  frames.push(base(behavior.roleOnly ? { role: 'assistant' } : { role: 'assistant', content: '' }));
+  const field = behavior.reasoningField || 'reasoning_content';
+  // Ollama puts the reasoning next to an empty `content`; the others send the reasoning key alone.
+  const reasoningDelta = (piece) => (flavor === 'ollama' ? { content: '', [field]: piece } : { [field]: piece });
+  const deltas = [];
   if (reasoning) {
-    for (const piece of splitIntoDeltas(reasoning === true ? DEFAULT_THOUGHT : String(reasoning), { chunkSize: 12 })) {
-      frames.push(base({ reasoning_content: piece }));
-    }
+    for (const piece of splitIntoDeltas(reasoning === true ? DEFAULT_THOUGHT : String(reasoning), { chunkSize: 12 })) deltas.push(reasoningDelta(piece));
   }
   const pieces = reply.reasoningOnly ? [] : splitIntoDeltas(text, { chunkSize: behavior.chunkSize, splitCodePoints: behavior.splitCodePoints });
   pieces.forEach((piece, i) => {
-    frames.push(base({ content: piece }));
-    if (behavior.emptyDeltas && i === 1) frames.push(base({}));
-    if (behavior.emptyDeltas && i === 3) frames.push(base({ content: '' }));
+    deltas.push({ content: piece });
+    if (behavior.emptyDeltas && i === 1) deltas.push({});
+    if (behavior.emptyDeltas && i === 3) deltas.push({ content: '' });
   });
-  return { frames, base, id, text, finish: reply.finishReason || 'stop' };
+  const frames = [];
+  if (flavor === 'ollama') {
+    // No role-only chunk: the role rides on the very first delta (verified live).
+    if (deltas.length === 0) deltas.push({ content: '' });
+    deltas[0] = { role: 'assistant', ...deltas[0] };
+  } else if (flavor === 'llamacpp') {
+    frames.push(base({ role: 'assistant', content: null }));
+  } else {
+    frames.push(base(behavior.roleOnly ? { role: 'assistant' } : { role: 'assistant', content: '' }));
+  }
+  for (const d of deltas) frames.push(base(d));
+  return { frames, base, id, created, text, finish: reply.finishReason || 'stop' };
+}
+
+/** The final usage chunk. Ollama and llama.cpp both append a `timings` block (verified live). */
+function usageChunk(behavior, { id, created, body, prompt, completion }) {
+  const flavor = behavior.flavor;
+  const model = flavor === 'llamacpp' ? behavior.models[0] : (body.model || 'mock-model');
+  const total = prompt + completion;
+  const timings = {
+    prompt_n: prompt, prompt_ms: Math.round(prompt * 8), prompt_per_token_ms: 8, prompt_per_second: 125,
+    predicted_n: completion, predicted_ms: Math.round(completion * 64), predicted_per_token_ms: 64, predicted_per_second: 15.6,
+  };
+  if (flavor === 'ollama') {
+    return {
+      id, object: 'chat.completion.chunk', created, model, system_fingerprint: FINGERPRINT.ollama, choices: [],
+      usage: { prompt_tokens: prompt, prompt_tokens_details: { cached_tokens: 0 }, completion_tokens: completion, total_tokens: total }, timings,
+    };
+  }
+  if (flavor === 'llamacpp') {
+    return {
+      choices: [], created, id, model, system_fingerprint: FINGERPRINT.llamacpp, object: 'chat.completion.chunk',
+      usage: { completion_tokens: completion, prompt_tokens: prompt, total_tokens: total, prompt_tokens_details: { cached_tokens: 0 } },
+      timings: { cache_n: 0, ...timings },
+    };
+  }
+  return {
+    id, object: 'chat.completion.chunk', created, model, choices: [],
+    usage: { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total },
+  };
 }
 
 async function sendStream(ctx, behavior, reply, fault) {
   const { res, conn, body } = ctx;
   const w = frameWriter(behavior);
-  const { frames, base, id, text, finish } = buildChunks(reply, body, behavior);
+  const { frames, base, id, created, text, finish } = buildChunks(reply, body, behavior);
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache',
@@ -287,13 +384,9 @@ async function sendStream(ctx, behavior, reply, fault) {
   const wantUsage = behavior.usage === 'always'
     || (behavior.usage === 'requested' && body.stream_options && body.stream_options.include_usage);
   if (wantUsage) {
-    const prompt = estimateTokens((body.messages || []).map((m) => m.content).join(' '));
+    const prompt = ctx.promptTokens ?? estimateTokens((body.messages || []).map((m) => m.content).join(' '));
     const completion = estimateTokens(text);
-    const usageChunk = {
-      id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: body.model || 'mock-model',
-      choices: [], usage: { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion },
-    };
-    if (!(await emit(w.data(usageChunk)))) return;
+    if (!(await emit(w.data(usageChunk(behavior, { id, created, body, prompt, completion }))))) return;
   }
   if (behavior.omitDone || (fault && fault.kind === 'no_done')) {
     await conn.hang();
@@ -305,17 +398,22 @@ async function sendStream(ctx, behavior, reply, fault) {
 
 function sendCompletionJson(ctx, behavior, reply, { contentType = 'application/json' } = {}) {
   const { res, body } = ctx;
+  const flavor = behavior.flavor;
   const thought = reply.think ?? behavior.think;
   const text = `${thought ? `<think>${thought === true ? DEFAULT_THOUGHT : thought}</think>\n\n` : ''}${reply.text}`;
-  const prompt = estimateTokens((body.messages || []).map((m) => m.content).join(' '));
+  const prompt = ctx.promptTokens ?? estimateTokens((body.messages || []).map((m) => m.content).join(' '));
   const completion = estimateTokens(text);
+  const message = { role: 'assistant', content: text };
+  const reasoning = reply.reasoningContent ?? behavior.reasoningContent;
+  if (reasoning && flavor !== 'openai') message[behavior.reasoningField || 'reasoning_content'] = reasoning === true ? DEFAULT_THOUGHT : String(reasoning);
   const payload = {
-    id: `chatcmpl-mock${Date.now().toString(36)}`,
+    id: chatId(flavor),
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
-    model: body.model || 'mock-model',
-    choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: reply.finishReason || 'stop' }],
-    usage: { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion },
+    model: flavor === 'llamacpp' ? behavior.models[0] : (body.model || 'mock-model'),
+    ...(FINGERPRINT[flavor] ? { system_fingerprint: FINGERPRINT[flavor] } : {}),
+    choices: [{ index: 0, message, finish_reason: reply.finishReason || 'stop' }],
+    usage: { prompt_tokens: prompt, ...(flavor === 'openai' ? {} : { prompt_tokens_details: { cached_tokens: 0 } }), completion_tokens: completion, total_tokens: prompt + completion },
   };
   const json = JSON.stringify(payload);
   res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': Buffer.byteLength(json) });
@@ -325,17 +423,24 @@ function sendCompletionJson(ctx, behavior, reply, { contentType = 'application/j
 function validateChat(ctx, behavior) {
   const { body } = ctx;
   const style = behavior.errorStyle;
+  const flavor = behavior.flavor;
   if (!body || typeof body !== 'object') {
-    return { status: 400, body: errorBody(style, { message: 'We could not parse the JSON body of your request.', status: 400 }) };
+    const message = flavor === 'ollama' ? 'unexpected EOF'
+      : flavor === 'llamacpp' ? '[json.exception.parse_error.101] parse error at line 1, column 34: syntax error while parsing value - unexpected end of input; expected \'[\', \'{\', or a literal'
+        : 'We could not parse the JSON body of your request.';
+    return { status: 400, body: errorBody(style, { message, status: 400 }) };
   }
-  if (typeof body.model !== 'string' || !body.model) {
-    return { status: 400, body: errorBody(style, { message: "you must provide a model parameter", code: null, status: 400 }) };
+  if (flavor !== 'llamacpp' && (typeof body.model !== 'string' || !body.model)) {
+    return { status: 400, body: errorBody(style, { message: flavor === 'ollama' ? 'model is required' : 'you must provide a model parameter', code: null, status: 400 }) };
   }
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
-    return { status: 400, body: errorBody(style, { message: "'messages' is a required property", param: 'messages', status: 400 }) };
+    const message = flavor === 'ollama' ? "[] is too short - 'messages'" : flavor === 'llamacpp' ? "'messages' is required" : "'messages' is a required property";
+    return { status: 400, body: errorBody(style, { message, param: 'messages', status: 400 }) };
   }
   for (const m of body.messages) {
-    if (!m || typeof m.content !== 'string' || !['system', 'user', 'assistant'].includes(m.role)) {
+    // Ollama accepts any role string without complaint (verified live: role "wizard" -> HTTP 200).
+    const roleOk = flavor === 'ollama' ? Boolean(m && typeof m.role === 'string') : Boolean(m && ['system', 'user', 'assistant'].includes(m.role));
+    if (!m || typeof m.content !== 'string' || !roleOk) {
       return { status: 400, body: errorBody(style, { message: "Invalid value for 'messages': each message needs a role and string content.", param: 'messages', status: 400 }) };
     }
   }
@@ -356,6 +461,47 @@ function validateChat(ctx, behavior) {
   return null;
 }
 
+const messageTokens = (m) => estimateTokens(m.content) + 4;
+
+/**
+ * Enforce `numCtx` the way the real servers do (verified live against Ollama 0.40.1 with a 4096 window):
+ *  - Ollama drops the OLDEST non-system messages until the prompt fits, keeping every system message and the latest
+ *    message; usage.prompt_tokens reports the trimmed prompt. A latest message that alone does not fit is a 400.
+ *  - llama.cpp answers 400 `exceed_context_size_error` (it carries n_prompt_tokens and n_ctx).
+ * Sets ctx.promptTokens / ctx.messages; returns an HTTP error description or null.
+ */
+function fitContext(ctx, behavior) {
+  const { flavor, numCtx } = behavior;
+  ctx.messages = ctx.body.messages;
+  if (!(numCtx > 0) || (flavor !== 'ollama' && flavor !== 'llamacpp')) return null;
+  let messages = ctx.body.messages;
+  let tokens = messages.reduce((n, m) => n + messageTokens(m), 0);
+  if (flavor === 'ollama') {
+    let dropped = 0;
+    while (tokens > numCtx) {
+      const i = messages.findIndex((m, idx) => m.role !== 'system' && idx !== messages.length - 1);
+      if (i < 0) break;
+      tokens -= messageTokens(messages[i]);
+      messages = messages.filter((_, idx) => idx !== i);
+      dropped += 1;
+    }
+    ctx.record.trimmedMessages = dropped;
+  }
+  if (tokens > numCtx) {
+    const inner = {
+      error: {
+        code: 400, message: `request (${tokens} tokens) exceeds the available context size (${numCtx} tokens), try increasing it`,
+        type: 'exceed_context_size_error', n_prompt_tokens: tokens, n_ctx: numCtx,
+      },
+    };
+    if (flavor === 'llamacpp') return { status: 400, body: inner };
+    return { status: 400, body: { error: { message: JSON.stringify(inner), type: 'invalid_request_error', param: null, code: null } } };
+  }
+  ctx.messages = messages;
+  ctx.promptTokens = tokens;
+  return null;
+}
+
 function checkAuth(ctx, behavior) {
   if (!behavior.apiKey) return null;
   const header = ctx.req.headers.authorization || '';
@@ -373,6 +519,14 @@ function respondHttp(ctx, out) {
   }
 }
 
+/** Unknown path: Go's mux (Ollama) answers plain text, llama-server a JSON error document. */
+function failNotFound(ctx, state) {
+  if (state.behavior.flavor === 'llamacpp') {
+    return sendJson(ctx.res, 404, { error: { message: 'File Not Found', type: 'not_found_error', code: 404 } });
+  }
+  return sendText(ctx.res, 404, '404 page not found');
+}
+
 async function handleChat(ctx, state) {
   const { behavior } = state;
   const { conn, res, body } = ctx;
@@ -386,13 +540,14 @@ async function handleChat(ctx, state) {
   }
   const authFail = checkAuth(ctx, behavior);
   if (authFail) { respondHttp(ctx, authFail); return; }
-  const invalid = validateChat(ctx, behavior);
+  const invalid = validateChat(ctx, behavior) || fitContext(ctx, behavior);
   if (invalid) { respondHttp(ctx, invalid); return; }
 
   if (behavior.ttfbMs > 0 && !(await conn.wait(behavior.ttfbMs))) return;
   const index = state.replyIndex;
   state.replyIndex += 1;
-  const replyCtx = { index, messages: body.messages, body, request: ctx.record };
+  state.loadedModel = body.model;
+  const replyCtx = { index, messages: ctx.messages, body, request: ctx.record };
   const reply = await resolveReply(behavior, replyCtx);
   if (spec && spec.kind === 'think_only') reply.thinkOnly = true;
   if (spec && spec.kind === 'reasoning_only') { reply.reasoningOnly = true; reply.reasoningContent = true; reply.finishReason = 'length'; }
@@ -418,11 +573,21 @@ function modelsPayload(behavior) {
   switch (behavior.modelsStyle) {
     case 'array': return list.map((id) => ({ id, object: 'model' }));
     case 'models-key': return { models: list.map((name) => ({ name, model: name })) };
+    case 'ollama':
+      // Newest first, NOT alphabetical, owned_by "library" (verified live).
+      return { object: 'list', data: list.map((id, i) => ({ id, object: 'model', created: 1791470349 - i * 8, owned_by: 'library' })) };
     case 'llamacpp':
+      // Verified live: the id is the path of the GGUF file; `models` (Ollama-style) and `data` (OpenAI-style) both present.
       return {
-        models: list.map((name) => ({ name, model: name, capabilities: ['completion'] })),
+        models: list.map((name) => ({
+          name, model: name, modified_at: '', size: '', digest: '', type: 'model', description: '', tags: [''], capabilities: ['completion'],
+          parameters: '', details: { parent_model: '', format: 'gguf', family: '', families: [''], parameter_size: '', quantization_level: '' },
+        })),
         object: 'list',
-        data: list.map((id) => ({ id, object: 'model', created: 1760000000, owned_by: 'llamacpp' })),
+        data: list.map((id) => ({
+          id, aliases: [id], tags: [], object: 'model', created: 1791470597, owned_by: 'llamacpp',
+          meta: { vocab_type: 2, n_vocab: 151936, n_ctx: behavior.numCtx || 4096, n_ctx_train: 40960, n_embd: 2048, n_params: 1720574976, size: 1101457408, ftype: 'Q4_K - Medium' },
+        })),
       };
     default:
       return { object: 'list', data: list.map((id) => ({ id, object: 'model', created: 1760000000, owned_by: 'mock' })) };
@@ -453,6 +618,11 @@ async function handlePull(ctx, state) {
     return;
   }
   const line = (obj) => `${JSON.stringify(obj)}\n`;
+  if (body.stream === false && pull.unreachable) {
+    const [name, tag = 'latest'] = model.split(':');
+    sendJson(res, 500, { error: `pull model manifest: Get "https://registry.ollama.ai/v2/library/${name}/manifests/${tag}": ${typeof pull.unreachable === 'string' ? pull.unreachable : 'Forbidden'}` });
+    return;
+  }
   if (body.stream === false) {
     sendJson(res, 200, { status: 'success' });
     if (!behavior.models.includes(model)) behavior.models.push(model);
@@ -461,6 +631,15 @@ async function handlePull(ctx, state) {
   res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
   res.flushHeaders();
   if (!(await conn.writeSliced(line({ status: 'pulling manifest' }), 1))) return;
+  if (pull.unreachable) {
+    // Verified live: even a model that is already installed makes Ollama ask the registry, and a failure there is an
+    // NDJSON error line on an HTTP 200 stream. "manifest" appears in the text although the model may well exist.
+    const [name, tag = 'latest'] = model.split(':');
+    const reason = typeof pull.unreachable === 'string' ? pull.unreachable : 'Forbidden';
+    await conn.write(line({ error: `pull model manifest: Get "https://registry.ollama.ai/v2/library/${name}/manifests/${tag}": ${reason}` }));
+    res.end();
+    return;
+  }
   if (pull.fail || /nonexistent|missing/i.test(model)) {
     await conn.write(line({ error: 'pull model manifest: file does not exist' }));
     res.end();
@@ -500,8 +679,14 @@ async function handlePull(ctx, state) {
 export async function createMockOpenAI(options = {}) {
   const { port = 0, host = '127.0.0.1', ...rest } = options;
   if (typeof rest.replies === 'string') rest.replies = [rest.replies];
+  const flavorDefaults = FLAVORS[rest.flavor || 'openai'];
+  if (!flavorDefaults) throw new Error(`unknown mock flavor "${rest.flavor}"`);
   const state = {
-    behavior: { ...DEFAULTS, ...rest, models: [...(rest.models || DEFAULTS.models)], pull: { ...DEFAULTS.pull, ...(rest.pull || {}) } },
+    behavior: {
+      ...DEFAULTS, ...flavorDefaults, ...rest,
+      models: [...(rest.models || flavorDefaults.models || DEFAULTS.models)],
+      pull: { ...DEFAULTS.pull, ...(rest.pull || {}) },
+    },
     replyIndex: 0,
   };
   if (Array.isArray(rest.failures)) state.behavior.failures = [...rest.failures];
@@ -514,13 +699,34 @@ export async function createMockOpenAI(options = {}) {
     async handle(ctx) {
       const path = ctx.url.pathname.replace(/^\/v1(?=\/|$)/, '').replace(/\/+$/, '') || '/';
       const { method } = ctx.req;
+      const flavor = state.behavior.flavor;
       if (method === 'POST' && path === '/chat/completions') return handleChat(ctx, state);
       if (method === 'GET' && path === '/models') return handleModels(ctx, state);
+      if (flavor === 'ollama' && method === 'GET' && path === '/chat/completions') {
+        return sendText(ctx.res, 405, '405 method not allowed', { Allow: 'POST' });
+      }
+      if (flavor === 'ollama' && method === 'GET' && path === '/') return sendText(ctx.res, 200, 'Ollama is running');
+      if (flavor === 'llamacpp' && method === 'GET' && path === '/health') return sendJson(ctx.res, 200, { status: 'ok' });
+      if (flavor === 'llamacpp') return failNotFound(ctx, state);
       if (state.behavior.ollama) {
         if (method === 'GET' && path === '/api/version') {
           return sendJson(ctx.res, 200, { version: state.behavior.ollamaVersion });
         }
         if (method === 'GET' && path === '/api/tags') {
+          if (flavor === 'ollama') {
+            // Real 0.40.1 shape (verified live): newest first, `capabilities`, and context_length / runner inside details.
+            return sendJson(ctx.res, 200, {
+              models: state.behavior.models.map((name, i) => ({
+                name, model: name, modified_at: new Date(1791470349000 - i * 8000).toISOString(), size: 1107410238,
+                digest: 'e37222736760a7fbebe7b4f0397266b337963b987689ac8f2ce27eb75dd9b395',
+                details: {
+                  parent_model: '', format: 'gguf', family: 'qwen3', families: ['qwen3'], parameter_size: '1.7B', quantization_level: 'Q4_K_M',
+                  context_length: 40960, embedding_length: 2048, runner: 'llamacpp',
+                },
+                capabilities: ['tools', 'thinking', 'completion'],
+              })),
+            });
+          }
           return sendJson(ctx.res, 200, {
             models: state.behavior.models.map((name) => ({
               name, model: name, modified_at: '2026-10-01T10:00:00Z', size: 2019393189,
@@ -529,9 +735,14 @@ export async function createMockOpenAI(options = {}) {
             })),
           });
         }
+        if (flavor === 'ollama' && method === 'GET' && path === '/api/ps') {
+          // Nothing loaded until a chat request arrived; then the last model with the real default window (4096).
+          const last = state.loadedModel;
+          return sendJson(ctx.res, 200, { models: last ? [{ name: last, model: last, size: 1904622959, details: { parent_model: '', format: 'gguf', family: 'qwen3', families: ['qwen3'], parameter_size: '1.7B', quantization_level: 'Q4_K_M' }, expires_at: new Date(Date.now() + 300000).toISOString(), size_vram: 1119774310, context_length: state.behavior.numCtx || 4096, runner: 'llamacpp' }] : [] });
+        }
         if (method === 'POST' && path === '/api/pull') return handlePull(ctx, state);
       }
-      return sendText(ctx.res, 404, '404 page not found');
+      return failNotFound(ctx, state);
     },
   });
 

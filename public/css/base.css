@@ -14,20 +14,25 @@
   --text-muted: #6a655d;
   --border: #e6dfd2;
   --border-strong: #cfc6b5;
+  /* Edge of an input, select or writing box: the only thing that shows where the control is, so it keeps 3:1 against the page (WCAG 1.4.11). */
+  --control-border: #8f887b;
 
-  --primary: #4f7a5f;
-  --primary-hover: #416650;
+  /* Brand colours are deep enough to carry text on every surface and soft fill below (4.5:1), not just on white. */
+  --primary: #486f56;
+  --primary-hover: #3b5f48;
   --primary-contrast: #ffffff;
   --primary-soft: #e3eee6;
-  --accent: #b84a5e;
+  --accent: #ab4356;
   --accent-soft: #f7e4e8;
   --warn: #8a5a0a;
   --warn-soft: #fbf0d9;
   --danger: #b3402f;
+  --danger-contrast: #ffffff;
   --danger-soft: #fbe6e2;
   --info: #2f5f93;
   --info-soft: #e2edf8;
-  --success: #2f7a4c;
+  --success: #2c7348;
+  --success-contrast: #ffffff;
   --success-soft: #e2f3e8;
 
   --mood-1: #c8586c;
@@ -58,6 +63,7 @@
   --text-muted: #a8a196;
   --border: #36332f;
   --border-strong: #4a463f;
+  --control-border: #7a746b;
   --primary: #7fb08f;
   --primary-hover: #94c2a2;
   --primary-contrast: #11190f;
@@ -67,10 +73,12 @@
   --warn: #e6b565;
   --warn-soft: #3a2f18;
   --danger: #ee8c7b;
+  --danger-contrast: #1f0b07;
   --danger-soft: #3c231e;
   --info: #8db8ea;
   --info-soft: #1f2e40;
   --success: #86cc9f;
+  --success-contrast: #0d1a11;
   --success-soft: #1f3327;
   --focus: #7aaaf5;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -89,6 +97,7 @@
     --text-muted: #a8a196;
     --border: #36332f;
     --border-strong: #4a463f;
+    --control-border: #7a746b;
     --primary: #7fb08f;
     --primary-hover: #94c2a2;
     --primary-contrast: #11190f;
@@ -98,10 +107,12 @@
     --warn: #e6b565;
     --warn-soft: #3a2f18;
     --danger: #ee8c7b;
+    --danger-contrast: #1f0b07;
     --danger-soft: #3c231e;
     --info: #8db8ea;
     --info-soft: #1f2e40;
     --success: #86cc9f;
+    --success-contrast: #0d1a11;
     --success-soft: #1f3327;
     --focus: #7aaaf5;
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -113,7 +124,12 @@
 
 /* ------------------------------------------------------------------ reset */
 *, *::before, *::after { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+html {
+  -webkit-text-size-adjust: 100%;
+  /* Keyboard focus and "scroll into view" must never end up behind the floating writing box (--dock-h, set by the entry view)
+     or the bottom tab bar (WCAG 2.4.11). */
+  scroll-padding-bottom: calc(var(--dock-h, 0px) + 1rem);
+}
 body {
   margin: 0;
   background: var(--bg);
@@ -142,7 +158,7 @@ img, svg { max-width: 100%; }
 
 /* ----------------------------------------------------------------- layout */
 .boot { min-height: 100vh; display: grid; place-items: center; padding: 1rem; }
-.shell { min-height: 100vh; display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); }
+.shell { min-height: 100vh; display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); align-content: start; }
 .view { min-width: 0; outline: none; padding: 2rem 1.5rem 3rem; }
 .view-loading { display: grid; place-items: center; min-height: 40vh; }
 .page { max-width: var(--content-w); margin: 0 auto; }
@@ -179,6 +195,7 @@ img, svg { max-width: 100%; }
 .shell.is-bare .sidebar, .shell.is-bare .tabbar { display: none; }
 
 @media (max-width: 899px) {
+  html { scroll-padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + var(--dock-h, 0px) + 1rem); }
   .shell { grid-template-columns: minmax(0, 1fr); padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); }
   .sidebar { display: none; }
   .view { padding: 1.25rem 1rem 2rem; }
@@ -191,6 +208,21 @@ img, svg { max-width: 100%; }
   .tab-link.is-active { color: var(--primary); }
   .shell.is-bare { padding-bottom: 0; }
 }
+
+
+/* ------------------------------------------------- server unreachable banner */
+.conn-host { grid-column: 1 / -1; position: sticky; top: 0; z-index: 80; }
+.conn-host:empty { display: none; }
+.conn-banner {
+  display: flex; align-items: center; justify-content: center; gap: 0.75rem; padding: 0.55rem 1rem;
+  background: var(--warn-soft); color: var(--text); border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+}
+.conn-banner > .icon { color: var(--warn); }
+.conn-banner-text { min-width: 0; }
+.conn-banner-state { color: var(--text-muted); }
+.shell.has-conn .sidebar { top: var(--conn-h, 0px); height: calc(100vh - var(--conn-h, 0px)); }
+html { scroll-padding-top: var(--conn-h, 0px); }
+@media (max-width: 520px) { .conn-banner { align-items: flex-start; flex-wrap: wrap; } .conn-banner-text { flex: 1 1 12rem; } }
 
 /* --------------------------------------------------------------- utilities */
 .stack { display: flex; flex-direction: column; gap: 1rem; }
@@ -217,8 +249,8 @@ img, svg { max-width: 100%; }
 .btn-primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); color: var(--primary-contrast); }
 .btn-ghost { background: transparent; border-color: transparent; }
 .btn-ghost:hover { background: var(--surface-2); }
-.btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
-.btn-danger:hover { background: var(--danger); filter: brightness(0.92); color: #fff; }
+.btn-danger { background: var(--danger); border-color: var(--danger); color: var(--danger-contrast); }
+.btn-danger:hover { background: var(--danger); filter: brightness(0.92); color: var(--danger-contrast); }
 .btn-outline-danger { color: var(--danger); border-color: var(--danger); }
 .btn-sm { padding: 0.3rem 0.65rem; min-height: 32px; font-size: 0.875rem; }
 .btn-icon { padding: 0.45rem; min-width: 40px; }
@@ -232,7 +264,7 @@ img, svg { max-width: 100%; }
 .field-hint { font-size: 0.8125rem; color: var(--text-muted); }
 .field-error { font-size: 0.8125rem; color: var(--danger); }
 .input, .textarea, .select {
-  width: 100%; padding: 0.55rem 0.75rem; background: var(--surface); border: 1px solid var(--border-strong);
+  width: 100%; padding: 0.55rem 0.75rem; background: var(--surface); border: 1px solid var(--control-border);
   border-radius: var(--radius-sm); min-height: 40px;
 }
 .textarea { resize: vertical; min-height: 96px; line-height: 1.55; }
@@ -282,7 +314,8 @@ button.chip:hover { border-color: var(--border-strong); }
 .mood-md { width: 44px; height: 44px; font-size: 1.4rem; }
 .mood-sm { width: 34px; height: 34px; font-size: 1.1rem; }
 .mood-lg { width: 52px; height: 52px; font-size: 1.7rem; }
-.mood-btn:hover { transform: scale(1.08); background: var(--surface-3); }
+.mood-btn:hover { background: var(--surface-3); }
+@media (hover: hover) { .mood-btn:hover { transform: scale(1.08); } } /* a touch screen keeps :hover after a tap, so nothing may stay enlarged */
 .mood-btn.is-active { border-color: var(--primary); background: var(--primary-soft); transform: scale(1.1); }
 
 /* ---------------------------------------------------------------- spinner */
@@ -298,24 +331,27 @@ button.chip:hover { border-color: var(--border-strong); }
 
 .empty { text-align: center; padding: 2.5rem 1rem; display: flex; flex-direction: column; align-items: center; gap: 0.5rem; }
 .empty-icon { width: 56px; height: 56px; border-radius: 50%; background: var(--primary-soft); color: var(--primary); display: grid; place-items: center; }
-.empty-title { margin: 0.25rem 0 0; }
+.empty-title { margin: 0.25rem 0 0; font-size: 1.1rem; }
 
 /* ------------------------------------------------------------ toast, modal */
-.toasts { position: fixed; z-index: 200; right: 1rem; bottom: 1rem; display: flex; flex-direction: column; gap: 0.5rem; max-width: min(420px, calc(100vw - 2rem)); }
-@media (max-width: 899px) { .toasts { bottom: calc(var(--tabbar-h) + 0.75rem + env(safe-area-inset-bottom)); left: 1rem; right: 1rem; max-width: none; } }
+/* Toasts sit at the top: the bottom of the screen belongs to the writing box and its Send button, which a message must never cover. */
+.toasts {
+  position: fixed; z-index: 200; right: 1rem; top: calc(var(--conn-h, 0px) + env(safe-area-inset-top) + 0.75rem);
+  display: flex; flex-direction: column; gap: 0.5rem; max-width: min(420px, calc(100vw - 2rem)); pointer-events: none;
+}
+.toasts > * { pointer-events: auto; }
+@media (max-width: 899px) { .toasts { left: 1rem; right: 1rem; max-width: none; } }
 .toast {
   display: flex; align-items: center; gap: 0.75rem; padding: 0.7rem 0.9rem; border-radius: var(--radius); background: var(--text); color: var(--bg);
   box-shadow: var(--shadow-lg); animation: toast-in 0.18s ease-out;
 }
-.toast-error { background: var(--danger); color: #fff; }
-.toast-success { background: var(--success); color: #fff; }
-:root[data-theme="dark"] .toast-success { color: #0d1a11; }
-:root[data-theme="dark"] .toast-error { color: #1f0b07; }
+.toast-error { background: var(--danger); color: var(--danger-contrast); }
+.toast-success { background: var(--success); color: var(--success-contrast); }
 .toast-msg { flex: 1; }
 .toast-action, .toast-close { background: none; border: 0; color: inherit; cursor: pointer; opacity: 0.9; padding: 0.15rem 0.3rem; border-radius: 4px; font-weight: 600; }
 .toast-action { text-decoration: underline; }
-.toast.is-leaving { opacity: 0; transform: translateY(6px); transition: all 0.18s; }
-@keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.toast.is-leaving { opacity: 0; transform: translateY(-6px); transition: all 0.18s; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
 
 .modal {
   border: 0; padding: 0; border-radius: var(--radius-lg); background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg);

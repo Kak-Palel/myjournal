@@ -1,7 +1,7 @@
 // The "What's on your mind?" box on the Today page. Like the entry composer it never loses text: the
 // draft is autosaved and the box is only cleared after the entry was created successfully.
 import { h } from '../lib/dom.js';
-import { icon, autosize, moodPicker } from '../lib/ui.js';
+import { icon, autosize, moodPicker, viewportShare, stripCode } from '../lib/ui.js';
 import { draftKey, readDraft, createDraftSaver, NEW_DRAFT_ID } from './entry-draft.js';
 import { createVoiceButton } from './entry-voice.js';
 import { SHORTCUT_LABEL } from './entry-composer.js';
@@ -25,7 +25,7 @@ export function createTodayComposer({ aiReady, onSubmit, notify }) {
     class: 'today-input', id: 'today-input', rows: 4, dir: 'auto', placeholder: 'What is on your mind?',
     'aria-label': 'Write a new journal entry', autocapitalize: 'sentences', spellcheck: 'true',
   });
-  const fit = autosize(textarea, { maxHeight: Math.max(200, Math.min(420, Math.round((window.innerHeight || 700) * 0.5))) });
+  const fit = autosize(textarea, { maxHeight: viewportShare(0.5, { min: 140, max: 420, shortShare: 0.4 }) });
   const interim = h('p', { class: 'today-interim', 'aria-hidden': 'true', hidden: true });
   const error = h('p', { class: 'today-error', role: 'alert', hidden: true });
   const promptEl = h('div', { class: 'today-prompt-ctx', hidden: true });
@@ -96,7 +96,7 @@ export function createTodayComposer({ aiReady, onSubmit, notify }) {
       saver.clear();
     } catch (err) {
       if (err && err.name === 'AbortError') return;
-      showError(`${err && err.message ? err.message : 'Could not save your entry.'}${err && err.hint ? ` ${err.hint}` : ''} Your text is still here.`);
+      showError(stripCode(`${err && err.message ? err.message : 'Could not save your entry.'}${err && err.hint ? ` ${err.hint}` : ''} Your text is still here.`));
     } finally {
       busy = false;
       start.disabled = false;

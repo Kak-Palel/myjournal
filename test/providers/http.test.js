@@ -67,6 +67,42 @@ test('parseErrorBody understands the error shapes seen in the wild', () => {
   assert.ok(p(`{"error":{"message":"${'x'.repeat(1000)}"}}`).message.length <= 300);
 });
 
+test('parseErrorBody unwraps the JSON error document Ollama nests inside its own message string (verified live) and reads llama.cpp\'s token counts', () => {
+  const inner = { error: { code: 400, message: 'request (6063 tokens) exceeds the available context size (4096 tokens), try increasing it', type: 'exceed_context_size_error', n_prompt_tokens: 6063, n_ctx: 4096 } };
+  const ollama = parseErrorBody(JSON.stringify({ error: { message: JSON.stringify(inner), type: 'invalid_request_error', param: null, code: null } }));
+  assert.equal(ollama.message, 'request (6063 tokens) exceeds the available context size (4096 tokens), try increasing it');
+  assert.equal(ollama.promptTokens, 6063);
+  assert.equal(ollama.contextTokens, 4096);
+  assert.equal(ollama.type, 'invalid_request_error');
+  const llama = parseErrorBody(JSON.stringify(inner));
+  assert.equal(llama.message, inner.error.message);
+  assert.equal(llama.promptTokens, 6063);
+  assert.equal(llama.contextTokens, 4096);
+  assert.equal(llama.type, 'exceed_context_size_error');
+  // a message that merely starts with a brace but is not an error document stays as it is
+  assert.equal(parseErrorBody('{"error":{"message":"{not json at all"}}').message, '{not json at all');
+  assert.equal(parseErrorBody('{"error":{"message":"{\\"unrelated\\":1}"}}').message, '{"unrelated":1}');
+  // plain errors have no counts
+  assert.deepEqual([parseErrorBody('{"error":{"message":"x"}}').promptTokens, parseErrorBody('{"error":{"message":"x"}}').contextTokens], [0, 0]);
+});
+
+test('a local first-byte timeout explains that giving up cancels the model load (verified live on Ollama) and points at the timeout setting', async () => {
+  const mk = (provider) => createScope({ firstByteMs: 5, ctx: { provider, secrets: [], url: 'http://127.0.0.1:11434/v1/chat/completions' } });
+  const local = mk('local');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const err = local.fail(new Error('aborted'));
+  local.close(true);
+  assert.equal(err.code, 'timeout');
+  assert.match(err.hint, /cancels that load/);
+  assert.match(err.hint, /Settings > General/);
+  const remote = mk('openai');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const err2 = remote.fail(new Error('aborted'));
+  remote.close(true);
+  assert.equal(err2.code, 'timeout');
+  assert.ok(!/cancels that load/.test(err2.hint), 'hosted services are not told about model loading');
+});
+
 test('networkError classifies fetch failures and always names the URL tried', () => {
   const mk = (code, message) => Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(message || code), { code }) });
   const cases = [

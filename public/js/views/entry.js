@@ -5,6 +5,7 @@
 // for the persisted message (rendered with renderMarkdown) on `done`.
 import { h, mount } from '../lib/dom.js';
 import { api } from '../lib/api.js';
+import { replaceHash } from '../lib/router.js';
 import { icon, emptyState, skeleton, showError, confirmDialog, copyText } from '../lib/ui.js';
 import { createHeader } from '../components/entry-header.js';
 import { createComposer } from '../components/entry-composer.js';
@@ -41,6 +42,7 @@ function slug(text) {
 
 function renderNotFound(root) {
   mount(root, h('div', { class: 'page entry-page' }, emptyState({
+    level: 1,
     icon: 'book',
     title: 'We cannot find that entry',
     body: 'It may have been deleted, or the link is not quite right.',
@@ -51,7 +53,7 @@ function renderNotFound(root) {
 }
 
 export default async function entryView(ctx) {
-  const { root, params, query, signal, app } = ctx;
+  const { root, params, query, signal, app, restoring } = ctx;
   const entryId = params.id;
   const base = `/entries/${encodeURIComponent(entryId)}`;
 
@@ -75,6 +77,8 @@ export default async function entryView(ctx) {
   /** @type {'idle'|'posting'|'replying'|'wrapping'|'stopping'} */
   let busy = 'idle';
   let controller = null;
+  /** The revealer of the reply that is being typed out, and whether its stream already ended (Stop then skips the typing). */
+  let activeReveal = null;
   let disposed = false;
   let leaving = false; // entry is being deleted: stop touching the UI
   let idleOwed = false; // a run was cut short while `leaving`; if the delete fails the UI still owes the writer the idle state
@@ -82,7 +86,6 @@ export default async function entryView(ctx) {
   let storedMemories = [];
   let patchChain = Promise.resolve();
   let summaryHost = null;
-  const reduced = reducedMotion();
   const disposers = [];
 
   const alive = () => !disposed && !leaving && !signal.aborted;
@@ -126,6 +129,14 @@ export default async function entryView(ctx) {
   });
   const dock = h('div', { class: 'entry-dock' }, bannerEl, jump, composer.el);
   mount(root, h('div', { class: 'page entry-page' }, h('h1', { class: 'sr-only' }, 'Journal entry'), header.el, thread, dock, status));
+
+  // The writing box floats over the bottom of the page. Tell the browser how tall it is (--dock-h feeds scroll-padding in
+  // base.css) so that tabbing to a control never leaves it hidden behind the box (WCAG 2.4.11 Focus Not Obscured).
+  if (typeof ResizeObserver !== 'undefined') {
+    const watch = new ResizeObserver(() => document.documentElement.style.setProperty('--dock-h', `${dock.offsetHeight}px`));
+    watch.observe(dock);
+    disposers.push(() => { watch.disconnect(); document.documentElement.style.removeProperty('--dock-h'); });
+  }
 
   /* ----------------------------------------------------------- small helpers */
   const isReplyAi = (m) => m.role === 'assistant' && (!m.meta || !m.meta.kind || m.meta.kind === 'reply');
@@ -204,7 +215,9 @@ export default async function entryView(ctx) {
     const frag = document.createDocumentFragment();
     summaryHost = null;
     if (messages.length === 0) {
-      frag.append(h('p', { class: 'entry-empty' }, 'Start with whatever is on your mind. Nothing is sent anywhere until you press Send.'));
+      frag.append(h('p', { class: 'entry-empty' }, aiReady()
+        ? 'Start with whatever is on your mind. Nothing is sent anywhere until you press Send.'
+        : 'Start with whatever is on your mind. It is saved on this computer when you press Save entry.'));
     }
     for (const m of messages) {
       frag.append(renderMessage(m, { canRegenerate: canRegenerate && m === last, handlers }));
@@ -396,13 +409,15 @@ export default async function entryView(ctx) {
     liveEl.replaceChildren(live.el);
     scrollToBottom(true);
     const reveal = createRevealer({
-      smooth: !reduced,
+      smooth: !reducedMotion(),
       append: (chunk) => { const stick = nearBottom(); live.append(chunk); if (stick) scrollToBottom(); else updateJump(); },
     });
+    activeReveal = reveal;
     const waitTimer = setTimeout(() => live.setWait(STILL_WAITING), 8000);
 
     let received = '';
     let ended = null;
+    let doneData = null;
     let errorPayload = null;
     let dropped = !regenerate;
     let askAsRegenerate = false;
@@ -430,7 +445,7 @@ export default async function entryView(ctx) {
         const text = data && typeof data.text === 'string' ? data.text : '';
         if (text) { received += text; reveal.push(text); }
       } else if (name === 'entry') { if (data && data.entry) applyEntry(data.entry); }
-      else if (name === 'done') { ended = 'done'; finishDone(data); }
+      else if (name === 'done') { ended = 'done'; doneData = data; }
       else if (name === 'error') { ended = 'error'; errorPayload = (data && data.error) || data || {}; }
     };
 
@@ -441,6 +456,12 @@ export default async function entryView(ctx) {
       if (!alive()) return;
       if (res.aborted) {
         await finishStopped(received, reveal);
+      } else if (ended === 'done') {
+        // The text may still be typing out (a provider that sends a few big frames): let it finish, at most a
+        // moment, and only then swap in the saved message. Stop skips the typing.
+        await reveal.finish();
+        if (!alive()) return;
+        finishDone(doneData);
       } else if (ended === 'error') {
         await failAfterStream(errorPayload, received, retryReply);
       } else if (ended !== 'done') {
@@ -459,6 +480,7 @@ export default async function entryView(ctx) {
     } finally {
       clearTimeout(waitTimer);
       reveal.cancel();
+      if (activeReveal === reveal) activeReveal = null;
       if (controller === ctl) controller = null;
       ctl.abort(); // already finished: this only detaches the listener childController() put on the view's signal
       if (alive()) {
@@ -500,6 +522,7 @@ export default async function entryView(ctx) {
   function onStop() {
     if (!controller || controller.signal.aborted) return;
     setBusy('stopping');
+    if (activeReveal) activeReveal.flush(); // a finished stream that is still typing out: show it all and carry on
     controller.abort();
   }
 
@@ -536,12 +559,14 @@ export default async function entryView(ctx) {
     liveEl.replaceChildren(live.el, stepper.el);
     scrollToBottom(true);
     const reveal = createRevealer({
-      smooth: !reduced,
+      smooth: !reducedMotion(),
       append: (chunk) => { const stick = nearBottom(); live.append(chunk); if (stick) scrollToBottom(); else updateJump(); },
     });
+    activeReveal = reveal;
     const waitTimer = setTimeout(() => live.setWait(STILL_WAITING), 8000);
 
     let ended = null;
+    let doneData = null;
     let errorPayload = null;
 
     function finishDone(data) {
@@ -564,7 +589,7 @@ export default async function entryView(ctx) {
       else if (name === 'delta') { const t = data && typeof data.text === 'string' ? data.text : ''; if (t) reveal.push(t); }
       else if (name === 'entry') { if (data && data.entry) applyEntry(data.entry); }
       else if (name === 'memories') { if (data && Array.isArray(data.added)) { justAdded = data.added; paintSummary(); } }
-      else if (name === 'done') { ended = 'done'; finishDone(data); }
+      else if (name === 'done') { ended = 'done'; doneData = data; }
       else if (name === 'error') { ended = 'error'; errorPayload = (data && data.error) || data || {}; }
     };
 
@@ -578,6 +603,10 @@ export default async function entryView(ctx) {
         app.toast('Wrap-up stopped. You can run it again any time.');
         await sleep(300, signal);
         await syncFromServer();
+      } else if (ended === 'done') {
+        await reveal.finish(); // the reflection may still be typing out; Stop skips that
+        if (!alive()) return;
+        finishDone(doneData);
       } else if (ended === 'error') {
         reveal.cancel();
         liveEl.replaceChildren();
@@ -597,6 +626,7 @@ export default async function entryView(ctx) {
     } finally {
       clearTimeout(waitTimer);
       reveal.cancel();
+      if (activeReveal === reveal) activeReveal = null;
       if (controller === ctl) controller = null;
       ctl.abort();
       if (alive()) {
@@ -679,7 +709,7 @@ export default async function entryView(ctx) {
   requestAnimationFrame(() => {
     if (!alive()) return;
     const recent = Date.now() - (entry.updatedAt || 0) < RECENT_MS;
-    if (query.get('reply') === '1' || (entry.status === 'open' && recent && messages.length > 0)) scrollToBottom();
+    if (!restoring && (query.get('reply') === '1' || (entry.status === 'open' && recent && messages.length > 0))) scrollToBottom();
     if (entry.status === 'open' && finePointer() && !controller) composer.focus({ preventScroll: true });
   });
 
@@ -688,7 +718,7 @@ export default async function entryView(ctx) {
     const q = new URLSearchParams(query);
     q.delete('reply');
     const qs = q.toString();
-    history.replaceState(null, '', `#/entry/${encodeURIComponent(entryId)}${qs ? `?${qs}` : ''}`);
+    replaceHash(`#/entry/${encodeURIComponent(entryId)}${qs ? `?${qs}` : ''}`);
     const last = lastMessage();
     if (last && last.role === 'user' && !autoRequested.has(last.id)) {
       autoRequested.add(last.id);
@@ -699,6 +729,7 @@ export default async function entryView(ctx) {
 
   return function cleanup() {
     disposed = true;
+    if (activeReveal) activeReveal.cancel();
     if (controller) controller.abort();
     composer.destroy();
     header.destroy();

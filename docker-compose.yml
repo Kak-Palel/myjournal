@@ -1,0 +1,135 @@
+# MyJournal with Docker Compose.
+#
+#   1. cp .env.example .env
+#      then set JOURNAL_PASSWORD in it (a long passphrase). Add GEMINI_API_KEY / OPENAI_API_KEY
+#      too if you like; you can also paste keys in the app under Settings instead.
+#   2. docker compose up -d --build
+#   3. open http://127.0.0.1:3210 and sign in with that password.
+#
+# Everything on one machine, including the model (Ollama in a container, CPU is fine for a small model):
+#   docker compose --profile ollama up -d --build
+#   -> the "ollama" service starts, the one-shot "ollama-pull" service downloads OLLAMA_MODEL once
+#      (about 2 GB for the default, watch it with: docker compose logs -f ollama-pull),
+#      and in the app you pick "Local model" (Settings > Local model), press Test connection, then Use this provider.
+#
+# Stop:                docker compose down        (your journal stays in the "journal-data" volume)
+# Delete EVERYTHING:   docker compose down -v     (this also deletes the journal volume. There is no undo.)
+# Back up:             use Settings > Data > Export in the app, or copy the volume while the app is stopped.
+
+name: myjournal
+
+services:
+  app:
+    build: .
+    image: myjournal:local
+    restart: unless-stopped
+
+    # Published on THIS computer's loopback only (127.0.0.1), so nobody else on your network can reach it.
+    # To use it from other devices, put a reverse proxy with HTTPS in front instead of widening this:
+    # the password would otherwise travel in clear text (see "Behind a reverse proxy" in the README).
+    ports:
+      - "127.0.0.1:${JOURNAL_HOST_PORT:-3210}:3210"
+
+    environment:
+      # Required. Inside a container MyJournal listens on 0.0.0.0, and it refuses to do that without a
+      # password (or JOURNAL_INSECURE_ALLOW_NO_AUTH=1, which this file deliberately does not offer).
+      # Compose stops with the message below if it is missing.
+      JOURNAL_PASSWORD: ${JOURNAL_PASSWORD:?Set JOURNAL_PASSWORD (a long passphrase) in the .env file next to docker-compose.yml, or in your shell}
+
+      # AI providers. All optional: unset means "not provided here" (set the key in the app instead).
+      # A key saved in the app wins over these. Keys from here are never written to the journal database.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+
+      # The "Local model" tab starts out pointing at the Ollama container of the "ollama" profile.
+      # For an Ollama running on the host computer use http://host.docker.internal:11434/v1 instead
+      # (that host's Ollama must listen on more than loopback: OLLAMA_HOST=0.0.0.0 there).
+      # These two only seed a fresh install: once you press Save in the app's settings, the saved
+      # address and model are used and changing them here no longer has any effect.
+      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-http://ollama:11434/v1}
+      LOCAL_LLM_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+
+      # The container clock is UTC. Replies and wrap-ups tell the model today's date from the server's
+      # clock, so set your time zone (for example Europe/Berlin) to have it match your day.
+      TZ: ${TZ:-UTC}
+
+      # Only needed behind a proxy that sends a different Host header than your browser's address.
+      # (With a password and the container's 0.0.0.0 bind the Host check is off anyway.)
+      # JOURNAL_ALLOWED_HOSTS: journal.example.com
+
+      # Behind a corporate HTTP(S) proxy: Node ignores HTTPS_PROXY unless NODE_USE_ENV_PROXY=1.
+      # NODE_USE_ENV_PROXY: "1"
+      # HTTPS_PROXY: http://proxy.example.com:3128
+      # NO_PROXY: ollama,localhost
+
+    volumes:
+      # The SQLite journal (journal.db) lives here. The image creates /data owned by the "node" user.
+      - journal-data:/data
+
+    # Lets the Local model tab reach an Ollama / llama.cpp / LM Studio on the host computer. Docker Desktop
+    # (Mac, Windows) defines this name by itself; Linux needs this line.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Hardening that costs nothing: MyJournal only writes to /data.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    # The health check comes from the Dockerfile: GET /api/health every 30 s (see "docker compose ps").
+
+  # ---------------------------------------------------------------------------------------------
+  # Optional local model. Only starts with:  docker compose --profile ollama up -d
+  # ---------------------------------------------------------------------------------------------
+  ollama:
+    profiles: ["ollama"]
+    # Pinned so a restart never changes behaviour behind your back. Newer versions: https://hub.docker.com/r/ollama/ollama/tags
+    image: ollama/ollama:0.40.1
+    restart: unless-stopped
+    environment:
+      # Ollama's default window is 4096 tokens on a typical machine, which loses the start of long
+      # conversations. A bigger window uses more memory; set 4096 here on a small machine.
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-8192}
+    volumes:
+      - ollama-models:/root/.ollama
+    # No "ports:" on purpose: only the app (same compose network) talks to Ollama, nothing is published.
+    # To use this Ollama from your computer as well, add:  ports: ["127.0.0.1:11434:11434"]
+    healthcheck:
+      # The image has no curl; "ollama list" asks the server and fails while it is not up yet.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    # NVIDIA GPU (needs the NVIDIA Container Toolkit on the host). Without it Ollama uses the CPU:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # Downloads the model into the ollama service once, then exits (restart: "no"). The download itself
+  # is done by the ollama server; this container only asks it. Run it again any time to resume or
+  # to fetch another model:  OLLAMA_MODEL=qwen2.5:1.5b docker compose --profile ollama run --rm ollama-pull
+  ollama-pull:
+    profiles: ["ollama"]
+    image: ollama/ollama:0.40.1
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["/bin/ollama"]
+    command: ["pull", "${OLLAMA_MODEL:-llama3.2:3b}"]
+
+volumes:
+  journal-data:
+  ollama-models:

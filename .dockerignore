@@ -1,0 +1,35 @@
+# Keep the build context small and keep private things out of the image.
+# The Dockerfile copies only package.json, server.js, src/ and public/, so this is a safety net:
+# even a careless "COPY . ." could not pick up a journal database or a key.
+
+# Your journal and your secrets, never in an image
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
+
+# Version control and local tooling
+.git
+.gitignore
+.scratch/
+.claude/
+node_modules/
+npm-debug.log*
+
+# Not needed to run the app
+test/
+test-results/
+screenshots/
+scripts/
+docs/
+*.md
+*.log
+.DS_Store
+
+# The container files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore

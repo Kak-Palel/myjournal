@@ -116,6 +116,16 @@ test('sortGeminiModels: -latest aliases first (alphabetical), then ids descendin
   ]);
 });
 
+test('sortGeminiModels: Gemma models go after every Gemini model (alphabetically "gemma" would beat "gemini")', () => {
+  // Live: with a plain descending sort gemma-4-31b-it was offered above gemini-3.8-flash in the picker.
+  const ids = ['gemma-4-26b-a4b-it', 'gemini-2.5-pro', 'gemma-4-31b-it', 'gemini-3.8-flash', 'gemma-3-27b-it', 'gemini-flash-lite-latest', 'gemma-latest'];
+  assert.deepEqual(sortGeminiModels(ids.map((id) => ({ id, label: id }))).map((m) => m.id), [
+    'gemini-flash-lite-latest', 'gemma-latest',
+    'gemini-3.8-flash', 'gemini-2.5-pro',
+    'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-3-27b-it',
+  ]);
+});
+
 // ---- requests ---------------------------------------------------------------------------------------------
 
 test('request shape: URL, alt=sse, header-only key, body (default model, thinking auto)', async () => {
@@ -468,7 +478,7 @@ test('listModels: filters non-chat models, strips models/, labels, sorts', async
     const models = await provider.listModels();
     assert.deepEqual(models.map((m) => m.id), [
       'gemini-flash-latest', 'gemini-flash-lite-latest', 'gemini-pro-latest',
-      'gemma-3-27b-it', 'gemini-2.5-pro', 'gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash',
+      'gemini-2.5-pro', 'gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemma-3-27b-it',
     ]);
     assert.equal(models[0].label, 'Gemini Flash Latest');
     const rq = mock.requests.at(-1);
@@ -503,7 +513,7 @@ test('listModels: allow-list ^(gemini|gemma)- then the contract exclusions (omni
     'antigravity-preview-latest', 'deep-research-pro-preview-12-2025', 'nano-banana-pro-preview', 'gemini-embedding-001', 'models-without-prefix',
     'gemini-3.1-flash-tts-preview', 'gemini-3.1-flash-image', 'gemini-3.8-live', 'gemini-robotics-er-2-preview'];
   await run({ models: ids.map(mk) }, async ({ provider }) => {
-    assert.deepEqual((await provider.listModels()).map((m) => m.id), ['gemini-flash-latest', 'gemini-pro-latest', 'gemma-4-31b-it', 'gemini-3.8-flash']);
+    assert.deepEqual((await provider.listModels()).map((m) => m.id), ['gemini-flash-latest', 'gemini-pro-latest', 'gemini-3.8-flash', 'gemma-4-31b-it']);
   });
 });
 

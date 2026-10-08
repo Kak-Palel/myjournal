@@ -4,7 +4,7 @@
 // The component never clears the text itself after a send: the view calls clear() once the server has
 // answered 201, so a failed request leaves everything exactly as typed.
 import { h } from '../lib/dom.js';
-import { icon, autosize } from '../lib/ui.js';
+import { icon, autosize, viewportShare } from '../lib/ui.js';
 import { draftKey, readDraft, createDraftSaver } from './entry-draft.js';
 import { createVoiceButton } from './entry-voice.js';
 import { MAX_MESSAGE_CHARS } from './entry-errors.js';
@@ -37,7 +37,7 @@ export function createComposer({ entryId, aiReady, hasMessages, handlers }) {
     'aria-label': 'Write in your journal', 'aria-describedby': `entry-hint-${entryId.slice(0, 8)}`,
     autocapitalize: 'sentences', spellcheck: 'true',
   });
-  const fit = autosize(textarea, { maxHeight: Math.max(160, Math.min(340, Math.round((window.innerHeight || 700) * 0.4))) });
+  const fit = autosize(textarea, { maxHeight: viewportShare(0.4, { min: 96, max: 340, shortShare: 0.3 }) });
   const interim = h('p', { class: 'entry-interim', 'aria-hidden': 'true', hidden: true });
   const count = h('span', { class: 'entry-count', hidden: true });
   const hint = h('p', { class: 'entry-hint', id: `entry-hint-${entryId.slice(0, 8)}` });
