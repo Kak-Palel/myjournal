@@ -123,6 +123,10 @@ describe('history', () => {
     }
     await cards(page).last().click(); // leave from deep in the list
     await page.waitForURL(/#\/entry\//);
+    // A person cannot press Back in the same instant the address changes: wait until the entry has opened. (Pressing Back
+    // within a few milliseconds, before the browser has even delivered the click's hashchange, is only possible for
+    // automation; the realistic quick Back, while the entry's code is still loading, has its own test below.)
+    await page.getByPlaceholder('Keep writing…').waitFor();
 
     // every request for the list from now on fails after the first one (a server restart, a 5xx)
     let listRequests = 0;
@@ -141,6 +145,24 @@ describe('history', () => {
     assert.ok(seen <= 3, `the restore gave up after ${seen} list requests`);
     assert.equal(listRequests, seen, 'and it stays quiet');
     assert.equal(await ui.button(page, 'Load more').count(), 1, 'the person can still press Load more');
+  }));
+
+  test('Back while the entry is still loading (a slow phone) still brings back the whole list', () => journey({ name: 'history-quick-back', seed: (db) => seedBulk(db, 320, { startHoursAgo: 1 }) }, async (j) => {
+    const { page } = j;
+    // the entry view's code takes 1.5 s to arrive, so Back is pressed while its spinner is still showing
+    await page.route('**/js/views/entry.js', async (route) => { await new Promise((resolve) => setTimeout(resolve, 1500)); await route.continue(); });
+    await j.goto('/history');
+    await eventually(async () => assert.equal(await cards(page).count(), 30));
+    for (let want = 60; want <= 150; want += 30) {
+      await ui.button(page, 'Load more').click();
+      await eventually(async () => assert.equal(await cards(page).count(), want), { message: `${want} cards` });
+    }
+    await cards(page).last().click();
+    await page.waitForURL(/#\/entry\//);
+    await page.waitForTimeout(300);
+    await page.goBack();
+    await page.waitForURL(/#\/history/);
+    await eventually(async () => assert.equal(await cards(page).count(), 150), { message: 'the 150 cards that were on screen come back', timeout: 15_000 });
   }));
 
   test('filters by mood, pinned and tag; chips on a card filter too; Clear filters resets', () => journey({ name: 'history-filters', seed }, async (j) => {
