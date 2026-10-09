@@ -48,6 +48,12 @@ describe('something', () => {
   exists and pass once it is fixed - remove its skip then).
 * `E2E_PUBLIC_DIR=/path/to/older/public` serves another copy of `public/` (for example `git archive <commit> public | tar -x -C
   /somewhere`), which is how a regression test is proven to fail on the old frontend and pass on the new one.
+* A `fresh` journey does not point Settings at the mocks (`configureMocks` defaults to false there), so the Local tab's address stays
+  `http://localhost:11434/v1` and the app talks to whatever listens on that port on the machine running the tests, a real Ollama
+  included (its installed models then show up in the model list). Pass `configureMocks: true` when a test looks at models or Test
+  connection on a fresh journal.
+* The sample journal (`seed: 'demo'`) is dated relative to the clock, and the tests must hold at every time of day: the whole suite was
+  green at 00:25 as well as in the afternoon, and `test/server/demo.test.js` pins the invariants for every half hour.
 * `journey({ env: { GEMINI_API_KEY: '...' } })` is the environment of the server (never the developer's own shell), and
   `keysInEnv: true` hands the mocks' API keys over that way instead of saving them in Settings.
 
@@ -58,7 +64,7 @@ describe('something', () => {
 | `first-run.e2e.js` | welcome screen, Local model, Test connection, Save, "Just journal, no AI" |
 | `write-and-reply.e2e.js` | mood, streamed reply, Stop, Regenerate, Wrap up, memory |
 | `guided.e2e.js` | Rose, Thorn, Bud and other guided journals |
-| `history.e2e.js` | months, Load more, search, filters, deep links |
+| `history.e2e.js` | months, Load more, search (and paging through more than 30 matches), filters, deep links, Back to a deep list when a page fails |
 | `insights.e2e.js` | stats, charts, range, weekly reflection |
 | `memory.e2e.js` | add, pin, edit, delete, clear, the three switches and their effect |
 | `settings-providers.e2e.js` | Gemini / OpenAI-compatible / Local tabs, key masking, error states, downloads, unsaved changes |
@@ -77,3 +83,6 @@ describe('something', () => {
 | `local-models.e2e.js` | Ollama / llama.cpp flavours: hidden reasoning, GGUF path model names, tiny context windows |
 | `composer.e2e.js` | drafts, the 20,000 character limit, copy/delete messages, header controls, Today's prompt and nudge |
 | `live-fixes.e2e.js` | what the live runs turned up: Gemini "Thinking" wording, the toolbar and model field on a phone, privacy wording, the browser's date in replies, installed local models, destructive dialogs, keys found in the environment, the on-screen keyboard |
+| `resilience.e2e.js` | the server stops and comes back (one banner, automatic recovery), Back and Forward in a long History, "Load more" keeps the keyboard, a reply in a few big frames is typed out progressively |
+| `polish.e2e.js` | the local model picker (order, honest notes), `GOOGLE_API_KEY` named as such, the wait text of Test connection for a local model, the General-tab hints and the 300 s timeout, the small-model memory warning (Memory page, Local tab), the Data-tab privacy paragraph, a reply with two questions |
+| `final-fixes.e2e.js` | the last review round: Save without reply on Today, the phone tab bar and the keyboard, drafts removed by Sign out / Delete everything (and kept when a session merely expires), Test connection scrolled into view, "Use this provider" vs "Save" after a good test, disclosure chevrons, Ready / Not tested yet / Model not installed / Selected, the API key field on the first Gemini screen, Memory with the AI off, the small-model warning after the switch is off, backdated entries and untitled cards in History, "Save entry" without an AI |

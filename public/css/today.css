@@ -21,7 +21,7 @@
 .today-nudge-host:empty, .today-prompt-host:empty, .today-pinned-host:empty { display: none; }
 
 /* ----------------------------------------------------------------- composer */
-.today-composer { padding: 0; border-radius: var(--radius-lg); border-color: var(--control-border); box-shadow: var(--shadow); transition: border-color 0.12s, box-shadow 0.12s; }
+.today-composer { padding: 0; border-radius: var(--radius-lg); border-color: var(--control-border); box-shadow: var(--shadow); transition: border-color 0.12s, box-shadow 0.12s; container: today-composer / inline-size; }
 .today-composer:focus-within { border-color: var(--focus); box-shadow: var(--shadow), 0 0 0 3px var(--today-ring); }
 .today-prompt-ctx {
   display: flex; align-items: flex-start; gap: 0.6rem; margin: 0.9rem 1rem 0; padding: 0.6rem 0.75rem; border-radius: var(--radius);
@@ -44,6 +44,10 @@
 .today-mood-label { font-size: 0.88rem; color: var(--text-muted); }
 .today-composer-actions { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
 .today-start { min-height: 46px; padding: 0.6rem 1.3rem; font-size: 1rem; }
+.today-save-only { min-height: 46px; }
+.today-composer-actions .btn { white-space: nowrap; }
+/* In the two-column layout the box is narrow: the keyboard hint gives way, so the two buttons keep their labels on one line each. */
+@container today-composer (max-width: 680px) { .today-hint { display: none; } }
 .today-hint { margin: 0; font-size: 0.78rem; color: var(--text-muted); }
 
 /* ------------------------------------------------------------ prompt of the day */
@@ -113,9 +117,15 @@
   .today-input { font-size: 1.12rem; min-height: 7rem; padding: 1rem 1rem 0.4rem; }
   .today-mood { padding: 0.4rem 1rem 0; }
   .today-composer-bar { padding: 0.6rem 0.75rem 0.8rem 1rem; }
-  .today-composer-actions { width: 100%; }
-  .today-start { flex: 1; }
+  .today-composer-actions { width: 100%; flex-wrap: wrap; }
+  .today-start { flex: 1 1 10rem; }
+  .today-save-only { flex: 1 1 10rem; }
   .today-hint { display: none; }
+}
+/* The on-screen keyboard covers the lower half of the screen and the tab bar stays above it, on top of "Start journaling": while
+   a finger-operated device is typing in the box the tab bar steps out of the way (it comes back when the box loses focus). */
+@media (pointer: coarse) and (max-width: 899px) {
+  .shell:has(.today-input:focus) .tabbar { display: none; }
 }
 @media (pointer: coarse), (max-width: 899px) {
   .today-page .btn, .today-page .btn-sm { min-height: var(--today-touch); }

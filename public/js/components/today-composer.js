@@ -10,8 +10,9 @@ import { MAX_MESSAGE_CHARS } from './entry-errors.js';
 /**
  * @param {object} opts
  * @param {boolean} opts.aiReady
- * @param {(input: { text: string, mood: number|null, prompt: string }) => Promise<void>} opts.onSubmit
- *   creates the entry; reject with an Error (message shown inline) to keep the text.
+ * @param {(input: { text: string, mood: number|null, prompt: string, reply: boolean }) => Promise<void>} opts.onSubmit
+ *   creates the entry (`reply: false` for "Save without reply": nothing is sent to the AI provider); reject with an Error
+ *   (message shown inline) to keep the text.
  * @param {(message: string) => void} opts.notify
  */
 export function createTodayComposer({ aiReady, onSubmit, notify }) {
@@ -32,6 +33,9 @@ export function createTodayComposer({ aiReady, onSubmit, notify }) {
 
   const mood = moodPicker({ value: null, size: 'md' });
   const start = h('button', { type: 'submit', class: 'btn btn-primary today-start' }, icon('pen', { size: 18 }), h('span', null, 'Start journaling'));
+  // With an AI on, "Start journaling" sends the first message to the provider at once. This is the way to write without that,
+  // the same choice the entry page offers (it is only shown while there is an AI; without one, Start journaling already is it).
+  const saveOnly = h('button', { type: 'button', class: 'btn today-save-only', hidden: !ready, onClick: () => submit({ reply: false }) }, h('span', null, 'Save without reply'));
 
   const voice = createVoiceButton({
     textarea,
@@ -53,7 +57,7 @@ export function createTodayComposer({ aiReady, onSubmit, notify }) {
       mood.el),
     h('div', { class: 'today-composer-bar' },
       hint,
-      h('div', { class: 'today-composer-actions' }, voice ? voice.el : null, start)));
+      h('div', { class: 'today-composer-actions' }, voice ? voice.el : null, saveOnly, start)));
 
   const draft = readDraft(key);
   if (draft) { textarea.value = draft; fit(); }
@@ -74,7 +78,7 @@ export function createTodayComposer({ aiReady, onSubmit, notify }) {
 
   function showError(message) { error.textContent = message; error.hidden = !message; }
 
-  async function submit() {
+  async function submit({ reply = true } = {}) {
     if (busy) return;
     const text = textarea.value.trim();
     if (!text) {
@@ -90,9 +94,11 @@ export function createTodayComposer({ aiReady, onSubmit, notify }) {
     showError('');
     busy = true;
     start.disabled = true;
-    start.querySelector('span').textContent = 'Starting…';
+    saveOnly.disabled = true;
+    const pressed = reply ? start : saveOnly;
+    pressed.querySelector('span').textContent = reply ? 'Starting…' : 'Saving…';
     try {
-      await onSubmit({ text, mood: mood.value, prompt: promptText });
+      await onSubmit({ text, mood: mood.value, prompt: promptText, reply });
       saver.clear();
     } catch (err) {
       if (err && err.name === 'AbortError') return;
@@ -100,7 +106,9 @@ export function createTodayComposer({ aiReady, onSubmit, notify }) {
     } finally {
       busy = false;
       start.disabled = false;
+      saveOnly.disabled = false;
       start.querySelector('span').textContent = 'Start journaling';
+      saveOnly.querySelector('span').textContent = 'Save without reply';
     }
   }
 
@@ -116,7 +124,7 @@ export function createTodayComposer({ aiReady, onSubmit, notify }) {
     focus(opts) { textarea.focus(opts); },
     /** Answer a prompt: shows it above the box and focuses the textarea. */
     setPrompt(text) { promptText = String(text || ''); paintPrompt(); textarea.focus(); },
-    setAiReady(next) { ready = next; return ready; },
+    setAiReady(next) { ready = next; saveOnly.hidden = !ready; return ready; },
     flushDraft: () => saver.flush(),
     destroy() { saver.flush(); if (voice) voice.destroy(); },
   };

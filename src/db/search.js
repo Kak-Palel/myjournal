@@ -142,6 +142,13 @@ const parseLimit = (value) => {
   return Number.isFinite(n) && n >= 1 ? Math.min(n, MAX_LIMIT) : DEFAULT_LIMIT;
 };
 
+/** How many of the best hits may be skipped to reach a later page (paging deeper than this is not offered). */
+const MAX_OFFSET = 1000;
+const parseOffset = (value) => {
+  const n = Math.trunc(Number(value));
+  return Number.isFinite(n) && n > 0 ? Math.min(n, MAX_OFFSET) : 0;
+};
+
 /**
  * @param {ReturnType<import('./context.js').createContext>} ctx
  */
@@ -172,13 +179,12 @@ export function createSearch(ctx) {
    */
   function purge() {
     ctx.handle.exec("INSERT INTO entry_search (entry_search) VALUES ('rebuild')");
+    stale = false; // nothing is left to purge until the next replace or delete (so scrub() and close() do not rebuild twice)
   }
 
   /** purge() unless nothing was replaced or deleted since the last time; used when closing. */
   function purgeIfStale() {
-    if (!stale) return;
-    purge();
-    stale = false;
+    if (stale) purge();
   }
 
   function dropRow(rid) {
@@ -347,17 +353,20 @@ export function createSearch(ctx) {
    * to a plain substring match so they are still found.
    *
    * @param {string} queryText untrusted user text
-   * @param {{ limit?: number, excludeEntryId?: string, includePrivate?: boolean, mode?: 'all'|'any',
+   * @param {{ limit?: number, offset?: number, excludeEntryId?: string, includePrivate?: boolean, mode?: 'all'|'any',
    *           mood?: number|string, tag?: string, from?: string, to?: string, pinned?: boolean|string }} [options]
    *   The entry filters accept exactly what entries.list() accepts (query-string values such as
    *   mood '3' or pinned '1' included) and throw DbError('invalid') for malformed ones.
+   *   `offset` skips that many of the best hits (at most MAX_OFFSET), so a caller can page through a long result list:
+   *   the ranking is deterministic (score, newest first, id), so page 2 continues where page 1 stopped.
    * @returns {{ entryId: string, rank: number, snippet: string }[]} best first. `rank` is the BM25
    *   score (smaller = better, usually negative); substring-only hits have rank 0 and come last.
    */
   function search(queryText, options = {}) {
     const opts = options ?? {};
     const mode = opts.mode === 'any' ? 'any' : 'all';
-    const limit = parseLimit(opts.limit);
+    const offset = parseOffset(opts.offset);
+    const limit = parseLimit(opts.limit) + offset; // the hits to collect: the skipped ones and the page
     // Validate the filters before looking at the text, so a bad filter is an error even when the
     // query itself turns out to be empty.
     const filters = entryFilters(opts);
@@ -384,7 +393,7 @@ export function createSearch(ctx) {
       const extra = substringStage(terms, mode, opts, filters, limit + seen.size);
       collect(extra, terms);
     }
-    return hits;
+    return offset > 0 ? hits.slice(offset) : hits;
   }
 
   function snippetFor(row, terms) {

@@ -132,7 +132,17 @@ export function firstWords(text, maxChars, { ellipsis = false } = {}) {
   return ellipsis ? `${trimmed}…` : trimmed;
 }
 
-const LABEL_BAD_EDGE = /^[\s"'`“”‘’«»<>()[\]{}#*_.,;:!?\-–—•]+|[\s"'`“”‘’«»<>()[\]{}*_.,;:!?\-–—•]+$/gu;
+// Junk at the edges of a label. Two anchored steps instead of one `[...]+$` regex: that form retries from every position of
+// a long run of such characters and takes quadratic time, and the text can come from a model.
+const LABEL_EDGE_START = /^[\s"'`“”‘’«»<>()[\]{}#*_.,;:!?\-–—•]+/u;
+const LABEL_EDGE_END_CHAR = /[\s"'`“”‘’«»<>()[\]{}*_.,;:!?\-–—•]/u;
+
+function stripLabelEdges(label) {
+  const start = label.replace(LABEL_EDGE_START, '');
+  let end = start.length;
+  while (end > 0 && LABEL_EDGE_END_CHAR.test(start[end - 1])) end -= 1;
+  return start.slice(0, end);
+}
 
 /**
  * Clean up a list of tags / emotions: lowercase, trimmed, de-duplicated, leading `#` and wrapping
@@ -148,8 +158,8 @@ export function normalizeLabels(list, { max = 5, maxLen = 24 } = {}) {
   const seen = new Set();
   for (const item of items) {
     if (typeof item !== 'string') continue;
-    let label = oneLine(item).toLowerCase().replace(LABEL_BAD_EDGE, '');
-    label = Array.from(label).slice(0, maxLen).join('').replace(LABEL_BAD_EDGE, '');
+    let label = stripLabelEdges(oneLine(item).toLowerCase());
+    label = stripLabelEdges(Array.from(label).slice(0, maxLen).join(''));
     if (!label || seen.has(label)) continue;
     seen.add(label);
     out.push(label);
@@ -236,14 +246,15 @@ const ABBREVIATIONS = new Set(['dr', 'mr', 'mrs', 'ms', 'prof', 'st', 'vs', 'etc
 
 /**
  * Split prose into sentences (also on line breaks and CJK full stops). Light abbreviation handling
- * ("Dr. Lee" stays together). Empty pieces are dropped.
+ * ("Dr. Lee" stays together). Empty pieces are dropped. At most 8 closing quotes or brackets may follow the full stop:
+ * the lookbehind is bounded because an open-ended one takes quadratic time on a long run of quotes (model text).
  * @param {unknown} text
  * @returns {string[]}
  */
 export function splitSentences(text) {
   if (typeof text !== 'string' || text.trim() === '') return [];
   const pieces = text
-    .split(/(?<=[.!?…]["')\]”’]*)\s+|(?<=[。！？])|\n+/u)
+    .split(/(?<=[.!?…]["')\]”’]{0,8})\s+|(?<=[。！？])|\n+/u)
     .map((p) => p.trim())
     .filter(Boolean);
   const out = [];

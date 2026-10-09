@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { ConfigError, assertSafeToStart, isLoopbackHost, loadConfig, loadDotEnv } from '../../src/config.js';
+import { ConfigError, assertSafeToStart, dotEnvPasswordWarning, isLoopbackHost, loadConfig, loadDotEnv } from '../../src/config.js';
 import { describeAi, formatBanner } from '../../src/server/banner.js';
 import { defaultSettings } from '../../src/settings.js';
 
@@ -119,6 +120,29 @@ describe('loadDotEnv', () => {
   });
 });
 
+describe('a .env password that Node would cut at a #', () => {
+  it('is recognised, quoted or commented-out lines are not', () => {
+    assert.match(dotEnvPasswordWarning('JOURNAL_PASSWORD=correct horse #1 staple battery\n'), /only 13 characters long/);
+    assert.match(dotEnvPasswordWarning('PORT=0\r\nexport JOURNAL_PASSWORD = a#b long passphrase'), /only 1 character long/);
+    assert.equal(dotEnvPasswordWarning("JOURNAL_PASSWORD='correct horse #1 staple battery'"), null);
+    assert.equal(dotEnvPasswordWarning('JOURNAL_PASSWORD="correct horse #1"'), null);
+    assert.equal(dotEnvPasswordWarning('# JOURNAL_PASSWORD=a#b\nJOURNAL_PASSWORD=plain passphrase'), null);
+    assert.equal(dotEnvPasswordWarning(''), null);
+  });
+
+  it('loadDotEnv reports it, unless the real environment already holds the password', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'myjournal-env-'));
+    try {
+      writeFileSync(join(dir, '.env'), 'MJ_TEST_OTHER=1\nJOURNAL_PASSWORD=correct horse #1 staple battery\n');
+      const noop = () => {};
+      assert.match(loadDotEnv({ cwd: dir, loader: noop, env: {} }).warning, /contains a #/);
+      assert.equal(loadDotEnv({ cwd: dir, loader: noop, env: { JOURNAL_PASSWORD: 'from the shell' } }).warning, undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('banner', () => {
   const config = loadConfig({ JOURNAL_DATA_DIR: '/data' }, { cwd: '/x' });
 
@@ -158,6 +182,24 @@ describe('banner', () => {
     assert.match(pw, /HTTPS/);
     assert.match(pw, /password is short/);
     assert.doesNotMatch(pw, /short'/);
+  });
+
+  it('warns about a short password on a loopback address too, and says how a .env file shortens one', () => {
+    const settings = defaultSettings();
+    const short = formatBanner({ config: { ...config, password: 'a' }, url: 'http://127.0.0.1:3210', settings });
+    assert.match(short, /password is short \(1 character\)/);
+    assert.match(short, /\.env file an unquoted #/);
+    assert.match(short, /single quotes/);
+    const fine = formatBanner({ config: { ...config, password: 'a long passphrase here' }, url: 'http://127.0.0.1:3210', settings });
+    assert.match(fine, /Password\s+required/);
+    assert.doesNotMatch(fine, /password is short/);
+  });
+
+  it('uses the right article in "found a/an ... key"', () => {
+    const settings = defaultSettings();
+    assert.match(describeAi(settings, { OPENAI_API_KEY: 'sk-x' }).text, /found an OpenAI key/);
+    assert.match(describeAi(settings, { GEMINI_API_KEY: 'k' }).text, /found a Gemini key/);
+    assert.match(describeAi(settings, { GOOGLE_API_KEY: 'k', OPENAI_API_KEY: 'sk-x' }).text, /found a Gemini and OpenAI key/);
   });
 });
 
@@ -259,5 +301,90 @@ describe('server.js', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('a data file that is not a database: says the file is the problem, leaves it alone and does not blame the folder', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'myjournal-badfile-'));
+    try {
+      mkdirSync(join(dir, 'data'));
+      writeFileSync(join(dir, 'data', 'journal.db'), 'this is not a sqlite file');
+      const r = await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'server.js')], {
+          cwd: dir,
+          env: { PATH: process.env.PATH, PORT: '0', JOURNAL_DATA_DIR: join(dir, 'data') },
+        });
+        let err = '';
+        const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('timeout')); }, 15000);
+        child.stderr.on('data', (d) => { err += d; });
+        child.on('close', (code) => { clearTimeout(timer); resolve({ code, err }); });
+      });
+      assert.equal(r.code, 1);
+      assert.match(r.err, /is not a readable MyJournal database \(file is not a database\)/);
+      assert.match(r.err, /MyJournal has not changed that file\. Restore a backup/);
+      assert.doesNotMatch(r.err, /exists and is writable|at .*\(.*\.js:\d+/);
+      assert.equal(readFileSync(join(dir, 'data', 'journal.db'), 'utf8'), 'this is not a sqlite file');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a SQLite file of another program in the data folder gets the same plain answer, not a crash with a stack trace', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'myjournal-foreign-'));
+    try {
+      mkdirSync(join(dir, 'data'));
+      const other = new DatabaseSync(join(dir, 'data', 'journal.db'));
+      other.exec('CREATE TABLE notes (id INTEGER PRIMARY KEY); PRAGMA user_version = 1');
+      other.close();
+      const r = await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'server.js')], {
+          cwd: dir,
+          env: { PATH: process.env.PATH, PORT: '0', JOURNAL_DATA_DIR: join(dir, 'data') },
+        });
+        let err = '';
+        const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('timeout')); }, 15000);
+        child.stderr.on('data', (d) => { err += d; });
+        child.on('close', (code) => { clearTimeout(timer); resolve({ code, err }); });
+      });
+      assert.equal(r.code, 1);
+      assert.match(r.err, /MyJournal could not start\./);
+      assert.match(r.err, /is not a MyJournal database \(no such table: entries\)/);
+      assert.doesNotMatch(r.err, /crashed while starting|at .*\(.*\.js:\d+/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a # in an unquoted .env password: the terminal says so, and single quotes keep the password whole', async () => {
+    const run = async (line) => {
+      const dir = mkdtempSync(join(tmpdir(), 'myjournal-dotenv-'));
+      try {
+        writeFileSync(join(dir, '.env'), `PORT=0\n${line}\n`);
+        return await new Promise((resolve, reject) => {
+          const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', join(ROOT, 'server.js')], {
+            cwd: dir,
+            env: { PATH: process.env.PATH, JOURNAL_DATA_DIR: join(dir, 'data') },
+          });
+          let out = '';
+          let err = '';
+          const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('timeout')); }, 15000);
+          child.stderr.on('data', (d) => { err += d; });
+          child.stdout.on('data', (d) => {
+            out += d;
+            if (/Stop with Ctrl\+C/.test(out)) child.kill('SIGINT');
+          });
+          child.on('close', (code) => { clearTimeout(timer); resolve({ code, out, err }); });
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const cut = await run('JOURNAL_PASSWORD=correct horse #1 staple battery');
+    assert.match(cut.err, /warning: the JOURNAL_PASSWORD line of your \.env file contains a #.*only 13 characters long/);
+    const short = await run('JOURNAL_PASSWORD=a#b long passphrase');
+    assert.match(short.out, /Your password is short \(1 character\)/);
+    const quoted = await run("JOURNAL_PASSWORD='correct horse #1 staple battery'");
+    assert.match(quoted.out, /Password\s+required/);
+    assert.doesNotMatch(quoted.err, /warning/);
+    assert.doesNotMatch(quoted.out, /password is short/);
   });
 });

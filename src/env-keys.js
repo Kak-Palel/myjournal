@@ -18,11 +18,23 @@ export const ENV_KEY_NAMES = Object.freeze({
 export function effectiveApiKey(providerId, savedKey, env = process.env) {
   const saved = typeof savedKey === 'string' ? savedKey.trim() : '';
   if (saved) return { key: saved, source: 'settings' };
+  const name = envKeyVariable(providerId, env);
+  return name ? { key: env[name].trim(), source: 'env' } : { key: '', source: 'none' };
+}
+
+/**
+ * The NAME of the environment variable that supplies a provider's key: the first of ENV_KEY_NAMES[providerId] that is
+ * set to something non-blank, else ''. Same order and same "blank is not set" rule as effectiveApiKey, so the name
+ * always belongs to the key that is used. Never returns a value.
+ * @param {'gemini'|'openai'|'local'} providerId
+ * @param {Record<string,string|undefined>} env
+ */
+export function envKeyVariable(providerId, env = process.env) {
   for (const name of ENV_KEY_NAMES[providerId] || []) {
     const value = env[name];
-    if (typeof value === 'string' && value.trim()) return { key: value.trim(), source: 'env' };
+    if (typeof value === 'string' && value.trim()) return name;
   }
-  return { key: '', source: 'none' };
+  return '';
 }
 
 /** "…abcd" style hint (last 4 chars) that is safe to show in the UI; '' when there is no key. */

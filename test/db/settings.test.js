@@ -49,8 +49,8 @@ test('the default first-byte timeout is one number, 180 s: enough for a cold loc
   assert.ok(DEFAULT_SETTINGS.ai.timeoutSec >= SETTINGS_LIMITS.timeoutSec.min && DEFAULT_SETTINGS.ai.timeoutSec <= SETTINGS_LIMITS.timeoutSec.max);
   assert.equal(normalizeSettings({}).ai.timeoutSec, 180);
   assert.equal(normalizeSettings({ ai: { timeoutSec: 'soon' } }).ai.timeoutSec, 180, 'garbage falls back to the default');
-  // validation is unchanged: 5..600, clamped; and 120 (the old default) stays a valid choice
-  assert.deepStrictEqual({ ...SETTINGS_LIMITS.timeoutSec }, { min: 5, max: 600 });
+  // 5..300, clamped (Node gives up on response headers after 300 s, so nothing above takes effect); 120 (the old default) stays valid
+  assert.deepStrictEqual({ ...SETTINGS_LIMITS.timeoutSec }, { min: 5, max: 300 });
   assert.equal(mergeSettings(DEFAULT_SETTINGS, { ai: { timeoutSec: 120 } }).settings.ai.timeoutSec, 120);
   // a document saved by an earlier build keeps its explicit number
   assert.equal(normalizeSettings({ ai: { timeoutSec: 120 } }).ai.timeoutSec, 120);
@@ -299,7 +299,7 @@ test('mergeSettings: out-of-range numbers are clamped, not errors', () => {
   assert.equal(settings.ai.temperature, 0);
   assert.equal(settings.ai.maxTokens, 8192);
   assert.equal(settings.ai.contextBudgetTokens, 500);
-  assert.equal(settings.ai.timeoutSec, 600);
+  assert.equal(settings.ai.timeoutSec, 300, 'nothing above 300 s takes effect, so 300 is the ceiling');
 });
 
 test('mergeSettings: URLs are trimmed, trailing slashes removed, empty resets to default', () => {
@@ -480,4 +480,15 @@ test('hostile settings JSON cannot smuggle a key into the public shape', () => {
   assert.ok(!JSON.stringify(pub).includes('SECRETVALUE'));
   assert.equal(pub.ai.providers.openai.apiKeySet, true);
   assert.equal(pub.ai.providers.openai.apiKeyHint, '…abcd');
+});
+
+test('timeoutSec: nothing above 300 s takes effect, so a stored 600 (an earlier build allowed it) reads back as 300', () => {
+  assert.equal(SETTINGS_LIMITS.timeoutSec.max, 300);
+  for (const stored of [301, 600, 99999]) assert.equal(normalizeSettings({ ai: { timeoutSec: stored } }).ai.timeoutSec, 300, String(stored));
+  for (const kept of [5, 120, 180, 299, 300]) assert.equal(normalizeSettings({ ai: { timeoutSec: kept } }).ai.timeoutSec, kept, String(kept));
+  // through the same path the server uses for a saved document, and for a PUT
+  const { settings, errors } = mergeSettings(DEFAULT_SETTINGS, { ai: { timeoutSec: 600 } });
+  assert.deepStrictEqual(errors, {});
+  assert.equal(settings.ai.timeoutSec, 300);
+  assert.equal(publicSettings(normalizeSettings({ ai: { timeoutSec: 600 } }), {}).ai.timeoutSec, 300);
 });

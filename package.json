@@ -6,14 +6,16 @@
   "private": true,
   "main": "server.js",
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=22.16.0 <23 || >=24"
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server.js",
     "dev": "node --watch --disable-warning=ExperimentalWarning server.js",
     "demo": "node --disable-warning=ExperimentalWarning scripts/demo.js",
     "mock-llm": "node --disable-warning=ExperimentalWarning test/mocks/serve.js",
+    "pretest": "node scripts/require-node.js \"npm test\"",
     "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/{providers,db,journal,server,frontend}/**/*.test.js\"",
+    "pretest:e2e": "node scripts/require-node.js \"npm run test:e2e\"",
     "test:e2e": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/e2e/**/*.e2e.js\"",
     "check": "node --disable-warning=ExperimentalWarning scripts/check.js"
   },

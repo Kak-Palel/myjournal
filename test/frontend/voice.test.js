@@ -15,7 +15,7 @@ import {
   splitChunk, createRevealer, distanceFromBottom, isNearBottom, announcementExcerpt,
 } from '../../public/js/components/entry-stream.js';
 import {
-  entryTitle, previewText, monthKey, monthStart, groupByMonth, searchTerms, highlightSegments, parseFilters, filtersToParams, hasActiveFilters, listPath,
+  entryTitle, cardTexts, previewText, monthKey, monthStart, placeInMonths, searchTerms, highlightSegments, parseFilters, filtersToParams, hasActiveFilters, listPath,
 } from '../../public/js/components/history-format.js';
 import {
   groupTemplates, streakInfo, weekEntryCount, nudgeState, newEntryBody,
@@ -693,6 +693,23 @@ describe('history-format: titles and months', () => {
     assert.equal(entryTitle({ title: '', preview: '' }), 'Untitled entry');
     assert.equal(entryTitle(null), 'Untitled entry');
   });
+  test('cardTexts: an untitled entry does not say the same words twice', () => {
+    // short entry: the title shows all of it, so there is no second line
+    assert.deepEqual(cardTexts({ title: '', preview: 'Garage day. My back hurts but I found my old guitar.' }), { title: 'Garage day. My back hurts but I found my old guitar.', excerpt: '' });
+    // longer: the title stops at a word and the second line carries on from there
+    const preview = 'Woke up late and missed the bus because my alarm did not go off, so I walked to work in the rain and thought about moving.';
+    const { title, excerpt } = cardTexts({ title: '', preview });
+    assert.match(title, /^Woke up late and missed the bus because my alarm [a-z ]+…$/);
+    assert.ok(title.length <= 60);
+    assert.equal(`${title.slice(0, -1)} ${excerpt}`, preview);
+    // a titled entry keeps title and preview as they are
+    assert.deepEqual(cardTexts({ title: 'Rainy walk', preview: 'Went out in the rain.' }), { title: 'Rainy walk', excerpt: 'Went out in the rain.' });
+    // a search excerpt that is only the start of the title is not shown again; one from further in is
+    assert.equal(cardTexts({ title: '', preview, snippet: 'Woke up late and missed' }).excerpt, '');
+    assert.equal(cardTexts({ title: '', preview, snippet: '…thought about moving.' }).excerpt, '…thought about moving.');
+    assert.deepEqual(cardTexts({ title: '', preview: '' }), { title: 'Untitled entry', excerpt: '' });
+    assert.deepEqual(cardTexts(null), { title: 'Untitled entry', excerpt: '' });
+  });
   test('previewText marks a cut preview, leaves short ones and snippets alone', () => {
     assert.equal(previewText({ preview: 'Short note.' }), 'Short note.');
     assert.equal(previewText({ preview: 'x'.repeat(160) }), `${'x'.repeat(160)}…`);
@@ -704,22 +721,47 @@ describe('history-format: titles and months', () => {
   test('monthKey prefers entry.date, falls back to createdAt', () => {
     assert.equal(monthKey({ date: '2026-10-08' }), '2026-10');
     assert.equal(monthKey({ date: 'garbage', createdAt: new Date(2026, 2, 5).getTime() }), '2026-03');
+    assert.equal(monthKey({ date: '2026-08-15', createdAt: new Date(2026, 9, 9, 12).getTime() }), '2026-08', 'a backdated entry belongs to the month it is dated in');
     assert.equal(monthKey({}), 'unknown');
     assert.equal(monthStart('2026-10'), '2026-10-01');
     assert.equal(monthStart('unknown'), '');
   });
-  test('groupByMonth keeps order and merges only consecutive months', () => {
-    const e = (id, date) => ({ id, date });
-    const groups = groupByMonth([e(1, '2026-10-08'), e(2, '2026-10-02'), e(3, '2026-09-30'), e(4, '2026-10-01')]);
-    assert.deepEqual(groups.map((g) => [g.key, g.entries.map((x) => x.id)]), [['2026-10', [1, 2]], ['2026-09', [3]], ['2026-10', [4]]]);
-    assert.equal(groups[0].continues, false);
+  /** Feed entries to placeInMonths in the given order; returns [[key, [ids]], ...]. */
+  const placed = (entries) => {
+    const months = [];
+    for (const e of entries) placeInMonths(months, e);
+    return months.map((m) => [m.key, m.entries.map((x) => x.id)]);
+  };
+  test('placeInMonths: entries written on their own day just join the end of their month, as before', () => {
+    const e = (id, date) => ({ id, date, createdAt: Date.parse(`${date}T12:00:00Z`) });
+    assert.deepEqual(placed([e(1, '2026-10-08'), e(2, '2026-10-02'), e(3, '2026-09-30'), e(4, '2026-09-01')]), [['2026-10', [1, 2]], ['2026-09', [3, 4]]]);
   });
-  test('groupByMonth marks a first group that continues the previous page', () => {
-    const groups = groupByMonth([{ id: 1, date: '2026-10-01' }, { id: 2, date: '2026-09-30' }], '2026-10');
-    assert.equal(groups[0].continues, true);
-    assert.equal(groups[1].continues, false);
-    assert.equal(groupByMonth([{ id: 1, date: '2026-10-01' }], '2026-09')[0].continues, false);
-    assert.deepEqual(groupByMonth([]), []);
+  test('placeInMonths: a backdated entry joins its own month, so no month gets two headings', () => {
+    const at = (month, day, hour = 12) => new Date(2026, month - 1, day, hour).getTime();
+    const entries = [
+      { id: 'T2', date: '2026-10-09', createdAt: at(10, 9, 15) },
+      { id: 'Backdated', date: '2026-08-15', createdAt: at(10, 9, 14) }, // written today, dated in August
+      { id: 'T1', date: '2026-10-09', createdAt: at(10, 9, 13) },
+      { id: 'Sept', date: '2026-09-02', createdAt: at(9, 2) },
+      { id: 'Aug', date: '2026-08-20', createdAt: at(8, 20) },
+    ];
+    assert.deepEqual(placed(entries), [['2026-10', ['T2', 'T1']], ['2026-09', ['Sept']], ['2026-08', ['Aug', 'Backdated']]]);
+  });
+  test('placeInMonths: the result does not depend on the order the pages arrive in; "unknown" goes last; ties are stable', () => {
+    const e = (id, date, createdAt = 0) => ({ id, date, createdAt });
+    const list = [e('a', '2026-10-09', 5), e('b', '2026-10-09', 5), e('c', '2026-09-01', 1), { id: 'd', date: 'x' }, e('f', '2026-10-01', 2)];
+    const want = [['2026-10', ['b', 'a', 'f']], ['2026-09', ['c']], ['unknown', ['d']]];
+    assert.deepEqual(placed(list), want);
+    assert.deepEqual(placed([...list].reverse()), want);
+    assert.deepEqual(placed([list[2], list[4], list[0], list[3], list[1]]), want);
+  });
+  test('placeInMonths reports where the card went', () => {
+    const months = [];
+    assert.deepEqual(placeInMonths(months, { id: 1, date: '2026-10-05', createdAt: 5 }), { monthIndex: 0, entryIndex: 0, newMonth: true });
+    assert.deepEqual(placeInMonths(months, { id: 2, date: '2026-10-04', createdAt: 4 }), { monthIndex: 0, entryIndex: 1, newMonth: false });
+    assert.deepEqual(placeInMonths(months, { id: 3, date: '2026-10-06', createdAt: 6 }), { monthIndex: 0, entryIndex: 0, newMonth: false });
+    assert.deepEqual(placeInMonths(months, { id: 4, date: '2026-11-01', createdAt: 7 }), { monthIndex: 0, entryIndex: 0, newMonth: true });
+    assert.deepEqual(placeInMonths(months, { id: 5, date: '2026-09-01', createdAt: 1 }), { monthIndex: 2, entryIndex: 0, newMonth: true });
   });
 });
 
@@ -821,6 +863,11 @@ describe('history-format: filters', () => {
     assert.ok(path.includes('q=a%26b%3Dc'), path);
     assert.ok(path.includes('limit=50'));
     assert.ok(!path.includes('before'));
+    assert.ok(!path.includes('offset'), 'the first page has no offset');
+    // a search continues by position, not by date
+    const next = listPath(search, { before: 5, offset: 30, limit: 30 });
+    assert.ok(next.includes('offset=30') && next.includes('limit=30') && !next.includes('before'), next);
+    assert.ok(!listPath(none, { before: 5, offset: 30 }).includes('offset'), 'a plain list never sends an offset');
   });
   test('roundtrip params -> filters', () => {
     const f = { q: 'tea & cake', mood: 3, tag: 'fam', pinned: true };

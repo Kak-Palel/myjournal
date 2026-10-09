@@ -258,6 +258,13 @@ function timeoutError(kind, ctx, ms) {
         : 'Try again. If it keeps happening, check the service status.',
     });
   }
+  if (ctx.fixedWait) {
+    // A check (Test connection, Load models) that waits a fixed time: the timeout in Settings does not change it.
+    return fail('timeout', `${who} did not answer within ${secs} ${unit}.`, {
+      hint: `This check waits at most ${secs} ${unit}, whatever the timeout in Settings says. `
+        + (local ? 'Make sure the model server is running and has finished starting, then try again.' : 'The service may be busy: try again in a moment.'),
+    });
+  }
   return fail('timeout', `${who} did not answer within ${secs} ${unit}.`, {
     // Verified live (Ollama 0.40.1): when the client gives up while the model is still loading, Ollama cancels the load
     // ("client connection closed before llama-server finished loading, aborting load"), so an immediate retry starts
@@ -277,7 +284,8 @@ function timeoutError(kind, ctx, ms) {
  * @param {AbortSignal} [opts.signal] the caller's signal
  * @param {number} opts.firstByteMs time allowed until the first body bytes arrive
  * @param {number} [opts.idleMs] allowed silence between chunks afterwards
- * @param {{provider: string, secrets?: string[], url: string}} opts.ctx used to build errors
+ * @param {{provider: string, secrets?: string[], url: string, fixedWait?: boolean}} opts.ctx used to build errors (`fixedWait`: the
+ *   first-byte wait is a fixed limit of a check, not the person's timeout setting, which changes the hint of a timeout)
  * @throws {DOMException} AbortError when the signal is already aborted
  */
 export function createScope({ signal, firstByteMs, idleMs = DEFAULT_IDLE_MS, ctx }) {

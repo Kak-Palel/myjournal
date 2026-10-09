@@ -6,8 +6,6 @@ You write. A companion answers with one gentle follow-up, saves the lasting thin
 
 One Node.js program with **no dependencies to install**, no account and no telemetry. Prefer no AI at all? It is still a calm, fast, private journal.
 
-<!-- screenshots: the lead will add docs/img/*.png -->
-
 | Today | An entry |
 |---|---|
 | ![Today: write freely, pick a guided journal or the prompt of the day](docs/img/today.png) | ![An entry: the companion asks one follow-up question at a time](docs/img/entry.png) |
@@ -15,6 +13,8 @@ One Node.js program with **no dependencies to install**, no account and no telem
 | Insights | Settings |
 |---|---|
 | ![Insights: streak, mood chart, calendar, top feelings and tags, weekly reflection](docs/img/insights.png) | ![Settings: choose Gemini, an OpenAI-compatible API or a model on your machine](docs/img/settings.png) |
+
+(Screenshots of `npm run demo`: sample entries and a pretend model.)
 
 - [Why](#why) · [Quick start](#quick-start) · [What you get](#what-you-get)
 - [Connect a model](#connect-a-model): [free Gemini](#a-free-gemini-key) · [OpenAI and compatible](#b-openai-or-any-openai-compatible-api) · [your own machine](#c-a-small-model-on-your-own-machine) · [Tested with](#tested-with)
@@ -34,10 +34,10 @@ A diary is the most private thing most people write, yet AI journaling usually m
 
 ## Quick start
 
-About a minute. You need **Node.js 22.13 or newer**. There is no `npm install` and no build step.
+About a minute. You need **Node.js 22.16 or newer** (Node 24 works too; the unit tests were run on 22.22 and 24.21). There is no `npm install` and no build step. Node 23, and Node 22.13 to 22.15, are too old: their built-in SQLite has no full-text search.
 
 ```bash
-node --version        # v22.13 or newer
+node --version        # v22.16 or newer, or v24+ (not v23)
 git clone https://github.com/Kak-Palel/myjournal.git
 cd myjournal
 npm start
@@ -45,13 +45,13 @@ npm start
 
 1. Open **http://127.0.0.1:3210**. The welcome screen asks which model your companion should use.
 2. Pick one:
-   - **Free Gemini** (*Use Gemini*) is the quickest real AI: create a key at <https://aistudio.google.com/apikey>, paste it, press **Test connection**, then **Use this provider**. ([Details](#a-free-gemini-key).)
+   - **Free Gemini** (*Use Gemini*) is the quickest real AI: create a key at <https://aistudio.google.com/apikey>, paste it, press **Test connection**, then **Save**. ([Details](#a-free-gemini-key).)
    - **Local small model** (*Run it locally*) keeps everything on your computer: install [Ollama](https://ollama.com/download), run `ollama pull llama3.2:3b`, and pick it. ([Details](#c-a-small-model-on-your-own-machine).)
    - **OpenAI-compatible** (*Use my own API*) takes an API key and, for services other than OpenAI, a base URL. ([Details](#b-openai-or-any-openai-compatible-api).)
    - **Just journal, no AI** skips all of it. You can add a model later under Settings.
 3. Write something on **Today** and press **Start journaling**.
 
-Already have `GEMINI_API_KEY` or `OPENAI_API_KEY` in your environment? The welcome screen says *Found GEMINI_API_KEY in your environment* and the setup is one step: **Test connection**.
+Already have `GEMINI_API_KEY` or `OPENAI_API_KEY` in your environment? The welcome screen says so (*Found GEMINI_API_KEY in your environment*; it names the variable that really holds the key, so a key in `GOOGLE_API_KEY` is shown as `GOOGLE_API_KEY`) and the key is already found, so there is nothing to paste: press **Test connection** to check that it works.
 
 Want to look around first, with no key at all? `npm run demo` starts the whole app with pretend models and three weeks of sample entries in a temporary folder that is deleted when you stop it. The replies are canned (nothing there is a real AI), but every screen works.
 
@@ -75,7 +75,7 @@ Stop the server with Ctrl+C. The terminal prints where your data lives: by defau
 
 ## Connect a model
 
-Pick one. You can switch any time under **Settings**; each provider keeps its own key, address and model. The flow is the same everywhere: open the provider's tab, fill in the fields, press **Test connection**, then **Use this provider**.
+Pick one. You can switch any time under **Settings**; each provider keeps its own key, address and model. The flow is the same everywhere: open the provider's tab, fill in the fields, press **Test connection**, then **Save**. (A provider you picked on the welcome screen is in use at once. On a tab of a provider that is *not* in use yet the last button is **Use this provider**: it saves and switches to it.)
 
 | | Needs | Costs | Where your text goes | Tried against the real thing? |
 |---|---|---|---|---|
@@ -86,7 +86,7 @@ Pick one. You can switch any time under **Settings**; each provider keeps its ow
 ### A. Free Gemini key
 
 1. Open <https://aistudio.google.com/apikey>, sign in with a Google account and create an API key.
-2. In MyJournal choose **Use Gemini** on the welcome screen (or **Settings → Gemini (free)**), paste the key, press **Test connection**, then **Use this provider**.
+2. In MyJournal choose **Use Gemini** on the welcome screen (or **Settings → Gemini (free)**), paste the key, press **Test connection**, then **Save** (**Use this provider** if another provider is in use).
 
 Or give the key through the environment (it is then never written to the journal file):
 
@@ -94,7 +94,7 @@ Or give the key through the environment (it is then never written to the journal
 GEMINI_API_KEY=your-key npm start
 ```
 
-An environment key alone does not switch the AI on: you still pick **Gemini** once on the welcome screen or in Settings (the terminal reminds you). But you paste nothing: the welcome screen says *Found GEMINI_API_KEY in your environment*, and one **Test connection** finishes the setup.
+An environment key alone does not switch the AI on: you still pick **Gemini** once on the welcome screen or in Settings (the terminal reminds you). But you paste nothing: the welcome screen says *Found GEMINI_API_KEY in your environment* (or `GOOGLE_API_KEY`, whichever you set), and the one step left is to press **Test connection** to check the key.
 
 **Model.** The default, `gemini-flash-lite-latest`, is the recommended one: measured live, its first word arrives in about a second (0.4 to 1.4 s, one 13 s outlier) and it has the most generous free quota. `gemini-flash-latest` is meant to be smarter, but it answered `503 "high demand"` to all 6 normal requests we sent it, and the one request that got through (with Low thinking) took 23 s to the first word. Use **Load models** to see what your key can use.
 
@@ -125,7 +125,9 @@ Set these in the real environment, not in `.env` (Node reads them before the app
    | Together | `https://api.together.xyz/v1` | press **Load models** |
 
    Any other service that speaks the OpenAI "chat completions" API (DeepSeek, Mistral, a company gateway, LiteLLM, vLLM, …) works the same way with its own base URL, which normally ends in `/v1`.
-3. Press **Load models** to pick a model your key can use (or type its name), **Test connection**, **Use this provider**.
+3. Press **Load models** to pick a model your key can use (or type its name), **Test connection**, then **Save** (**Use this provider** if another provider is in use).
+
+   A preset only fills in the address. The **Model** box still says `gpt-4o-mini` until you change it, so replace it (for OpenRouter, for example, `openai/gpt-4o-mini`) or press **Load models**.
 
 Through the environment instead:
 
@@ -149,11 +151,11 @@ Nothing leaves your computer, it works offline and it costs nothing, at the pric
 2. Download a model:
 
    ```bash
-   ollama pull llama3.2:3b        # the default, about 2 GB
+   ollama pull llama3.2:3b        # the default and our recommendation, about 2 GB (we could not run a model this size ourselves)
    ollama pull qwen3:1.7b         # smaller: the best of the small models we measured
    ```
 
-   Other choices in the app's picker: `llama3.2:1b` (about 1.3 GB, testing only), `qwen2.5:1.5b`, `gemma2:2b`, `smollm2:1.7b`. Any model your server has works if you type its name.
+   The app's picker lists them in this order: `llama3.2:3b` (recommended), `qwen3:1.7b` (best measured), `llama3.2:1b` (about 1.3 GB, basic), then `qwen2.5:1.5b`, `gemma2:2b` and `smollm2:1.7b`, which say *not measured by us* because nobody here ran them. (`smollm2:360m` is for plumbing tests only and is not offered.) Any model your server has works if you type its name.
 3. Give it a bigger memory window if you can. Ollama's default is 4096 tokens (we measured exactly that on a CPU-only machine; its help says "4k/32k/256k based on VRAM"), which MyJournal's default settings fit, but longer conversations are shortened sooner. Start it with more:
 
    ```bash
@@ -161,7 +163,7 @@ Nothing leaves your computer, it works offline and it costs nothing, at the pric
    ```
 
    (Windows PowerShell: `$env:OLLAMA_CONTEXT_LENGTH=8192; ollama serve`.) If Ollama runs as a background service or app, set `OLLAMA_CONTEXT_LENGTH` in that service's environment and restart it. A larger window uses more memory (llama3.2:1b went from 1.95 GB to 2.17 GB).
-4. In MyJournal: **Settings → Local model**. The default address `http://localhost:11434/v1` is already the Ollama preset and the default model is `llama3.2:3b`. Press **Test connection**, then **Use this provider**.
+4. In MyJournal: **Settings → Local model**. The default address `http://localhost:11434/v1` is already the Ollama preset and the default model is `llama3.2:3b`. Press **Test connection**, then **Save** (**Use this provider** if another provider is in use).
 
 Skip step 2 if you like: the **Download model** button on that tab fetches the model through your Ollama server and shows progress (it turns into *Already installed* when the model is there). The very first reply after a download is slower while the model loads into memory.
 
@@ -183,7 +185,7 @@ Load a model in LM Studio and start its local server (default port 1234), then p
 - **Long conversations stay fast.** Ollama and llama.cpp keep the processed start of the prompt and only compute what is new. So for local models MyJournal drops the oldest turns of a long conversation in blocks (8 at a time) rather than one per reply, which keeps that start unchanged for several replies: in a 30-turn test on llama3.2:1b the median reply fell from about 9 s to 2.7 s.
 - **First reply is slow.** The first request after starting a model loads it into memory (1 to 7 s for the models we measured, longer for big ones or slow disks). The default wait for the first word is 180 seconds; raise *Wait for the first word* in Settings → General if it still times out.
 - **"Thinking" models** (qwen3-style) are handled: MyJournal asks them not to think (a `qwen3:1.7b` reply took about 4 s instead of 8 to 14 s) and strips any `<think>…</think>` text that still arrives.
-- **Memory suggestions from small models are unreliable.** With a 1B model most suggested facts were junk (1 valid of 5 stored). Look at the **Memory** page now and then, or switch off *Suggest memories when I wrap up an entry* there.
+- **Memory suggestions from small models are unreliable.** With a 1B model most suggested facts were junk (1 valid of 5 stored). Look at the **Memory** page now and then, or switch off *Suggest memories when I wrap up an entry* there. When the local model in use is under about 3B (`llama3.2:1b`, `qwen3:1.7b`, `smollm2:360m`, …) the app warns you in one line on the Memory page and on the Local model tab; it is only a warning.
 - A local server on *another* computer works too (set its address), but your text then travels to that computer, over plain `http://` unless you set up HTTPS.
 
 ## Tested with
@@ -197,7 +199,7 @@ What was actually run, and what was not. Measured on 2026-10-08. The full tables
 | **llama.cpp** `llama-server` (the build bundled in that image) | The same three models | Works: streaming, model list (GGUF file name), the exact context-overflow error with both numbers. |
 | **OpenAI API** (and OpenRouter, Groq, Together, …) | **Not tested.** No network access to them from the development machine. | Mock servers and the documented API only. |
 | **LM Studio**, **vLLM** | **Not tested.** | Documentation only. |
-| The app itself | `npm test` (about 1,470 tests with mock servers), `npm run test:e2e` (165 browser tests in Chromium), an accessibility audit with axe | All pass. Not run: Firefox, Safari, a real phone and its keyboard, macOS, Windows. |
+| The app itself | `npm test` (about 1,590 tests with mock servers), `npm run test:e2e` (204 browser tests in Chromium), an accessibility audit with axe | All pass. Not run: Firefox, Safari, a real phone and its keyboard, macOS, Windows. |
 
 The local models, on that CPU-only machine (4 cores):
 
@@ -215,11 +217,11 @@ Gemini Flash-Lite is the quality reference: in the same 26-reply check every rep
 Optional. Needs Docker with Compose v2. The container listens on all interfaces *inside* Docker, so a password is **required** (the server refuses to start without one), and the compose file publishes the port on `127.0.0.1` only. (The compose file was checked with `docker compose config` and the Dockerfile with a linter, and the container's exact start and health-check commands were run natively. No Docker daemon was available where this was written, so the image itself was not built and started.)
 
 ```bash
-cp .env.example .env          # then edit .env and set JOURNAL_PASSWORD to a long passphrase
+cp .env.example .env          # then open .env, delete the # in front of JOURNAL_PASSWORD= and put a long passphrase after the =
 docker compose up -d --build
 ```
 
-Open <http://127.0.0.1:3210> and sign in. Your journal is in the `journal-data` Docker volume.
+Open <http://127.0.0.1:3210> and sign in. Your journal is in the `journal-data` Docker volume. (If the passphrase contains `#` or `$`, put it in single quotes: `JOURNAL_PASSWORD='my pass#word$1'`. Unquoted, Docker Compose and Node cut it short without a word; see [the `.env` note below](#configuration-reference).)
 
 With a small model in a container too (CPU is fine; the default model is about 2 GB):
 
@@ -258,6 +260,8 @@ Everything is optional. Set variables in the environment, or in a `.env` file in
 
 Keys from the environment are never written to the journal file. The three `*_BASE_URL` / `LOCAL_LLM_MODEL` variables only seed a **fresh install**: one with no settings saved yet. The first Save in the app (the welcome screen's first choice counts) stores what Settings shows, and from then on the variables never override it (see [B](#b-openai-or-any-openai-compatible-api)); wiping everything *including settings* makes the install fresh again. So adding them later, say by enabling the compose `ollama` profile for an existing journal, has no effect: set the address in Settings.
 
+**Quoting in `.env`.** One `NAME=value` per line, no spaces around `=`. A value that contains `#` or `$` goes in single quotes (`JOURNAL_PASSWORD='my pass#word$1'`): an unquoted `#` starts a comment for Node, and Docker Compose also replaces `$name`, so the password would silently be shorter than you typed. MyJournal warns in the terminal when the `JOURNAL_PASSWORD` line of `.env` has an unquoted `#`, and when a password is under 10 characters.
+
 Docker Compose adds `JOURNAL_HOST_PORT` (host port, default `3210`), `TZ`, `OLLAMA_MODEL` and `OLLAMA_CONTEXT_LENGTH`; they are explained in `.env.example`.
 
 **Settings in the app** (Settings → General) and their limits:
@@ -267,18 +271,18 @@ Docker Compose adds `JOURNAL_HOST_PORT` (host port, default `3210`), `TZ`, `OLLA
 | Creativity (temperature) | 0.7 | 0 to 2 |
 | Longest reply (tokens) | 700 | 64 to 8192 |
 | Context budget (tokens, approximate) | 3000 | 500 to 32000 |
-| Wait for the first word (seconds) | 180 | 5 to 600 |
+| Wait for the first word (seconds) | 180 | 5 to 300 (nothing longer takes effect: Node itself stops waiting for response headers after 300 s) |
 | Memory, suggest memories after wrap-up, recall related entries | all on | on / off |
 | Use the AI companion | on | on / off |
 
 ## Your data and privacy
 
-- **Where it lives.** One SQLite file, `journal.db`, in the data folder (plus `journal.db-wal` and `-shm` files while the server runs). Entries, your messages, the companion's replies, memories, reports and your settings are all in it. The folder is created readable by you only. Nothing is stored anywhere else, except a few small things in your browser: your theme, the Insights range you picked, and an unsent draft while you type (it is removed once the text is saved).
+- **Where it lives.** One SQLite file, `journal.db`, in the data folder (plus `journal.db-wal` and `-shm` files while the server runs). Entries, your messages, the companion's replies, memories, reports and your settings are all in it. The folder is created readable by you only. Nothing is stored anywhere else, except a few small things in your browser: your theme, the Insights range you picked, and an unsent draft while you type (it is removed once the text is saved, and by Sign out and Delete everything).
 - **What leaves your computer.** Only AI requests, and only to the provider you chose. With a local model on this computer, nothing. MyJournal has no accounts, no analytics and no telemetry, and the web page loads no scripts, fonts or images from other sites.
-- **What a reply sends.** The current conversation (shortened to your context budget), today's date, your name and "About you" text, your memories, the mood you logged for the entry, a guided session's instructions and, if *Recall related past entries* is on, a few short excerpts of older entries (never private ones), and nothing else. Not the rest of your journal, not your settings, not your keys. Wrap-up repeats the conversation for the closing reflection, then sends only what *you* wrote for the title-and-summary step, and what you wrote plus your known memories for the memory step. A weekly reflection sends titles, summaries or short excerpts, moods, feelings and tags of that period's non-private entries, plus your memories.
+- **What a reply sends.** The current conversation (shortened to your context budget), today's date, your name and "About you" text, your companion's style (the voice you chose, and the description you wrote if you made your own), your memories, the mood you logged for the entry, a guided session's instructions and, if *Recall related past entries* is on, a few short excerpts of older entries (never private ones), and nothing else. Not the rest of your journal, not your settings, not your keys. Wrap-up repeats the conversation for the closing reflection, then sends only what *you* wrote for the title-and-summary step, and what you wrote plus your known memories for the memory step. A weekly reflection sends titles, summaries or short excerpts, moods, feelings and tags of up to 200 of that period's non-private entries, plus your memories, your name, your "About you" text and your companion's style. Settings → Data lists both.
 - **Private flag.** A private entry is kept out of memory, recall and weekly reflections. **It is still sent to your AI provider when you ask for a reply in it**: replies in a private entry are written by the same provider as any other. Use **Save without reply**, or switch the AI off, for text no model should see.
 - **API keys** you paste into Settings are stored **unencrypted** in `journal.db`. If that matters, leave the key fields empty and use the environment variables instead; keys from the environment are never written to the file. Exports never contain settings or keys.
-- **Backups, moving and deleting.** Copy the data folder while the server is stopped, or use **Settings → Data → Export** (JSON restores everything; Markdown is for reading). **Settings → Data → Delete everything** removes entries, messages, memories and reports (optionally settings and keys too) and compacts the file; there is no undo.
+- **Backups, moving and deleting.** Copy the data folder while the server is stopped, or use **Settings → Data → Export** (JSON restores your entries, memories and reports, but not your settings, keys, name, "About you" text or companion style: set those up again; Markdown is for reading). **Settings → Data → Delete everything** removes entries, messages, memories and reports (optionally settings and keys too) and compacts the file; there is no undo. Deleting one entry, message, memory or report removes its text from the database files at once as well.
 
 The complete picture, per provider: [docs/PRIVACY.md](docs/PRIVACY.md).
 
@@ -304,22 +308,22 @@ src/db/              SQLite storage (node:sqlite): entries, messages, memories, 
 src/journal/         pure journaling logic: prompts, language detection, personas, guided templates, insights, safety
 src/server/          HTTP layer: routes, security, auth, generation (streaming), static files
 public/              the web app: plain JavaScript modules and CSS, no build step
-scripts/             demo.js (npm run demo), check.js (npm run check)
+scripts/             demo.js (npm run demo: a launcher that checks the Node version first) with demo-lib.js, require-node.js (the pretest hooks), check.js (npm run check)
 test/                unit and integration tests, mock model servers, recorded real responses, browser tests
-docs/                PROVIDERS.md, PRIVACY.md, ARCHITECTURE.md
+docs/                PROVIDERS.md, PRIVACY.md, ARCHITECTURE.md, img/ (the screenshots above)
 Dockerfile, docker-compose.yml, .env.example
 ```
 
 ## Development
 
-Node 22.13 or newer. The product has zero dependencies; keep it that way.
+Node 22.16 or newer (or 24+). The product has zero dependencies; keep it that way.
 
 ```bash
 npm start            # run the server
 npm run dev          # same, restarting on file changes
-npm test             # unit + integration tests with mock model servers (about 1,470 tests, 1-2 minutes)
+npm test             # unit + integration tests with mock model servers (about 1,590 tests, 1-2 minutes)
 npm run check        # node --check on every script, and no innerHTML / eval anywhere in public/
-npm run test:e2e     # real-browser journeys (165 tests, about 5 minutes); needs Playwright + Chromium (not dependencies), skipped without them
+npm run test:e2e     # real-browser journeys (204 tests, about 7 minutes); needs Playwright and Chromium, which are not dependencies: run `npm i --no-save playwright-core`, then `npx playwright install chromium` (or set `CHROMIUM_PATH` to a Chrome or Chromium binary). Skipped without them
 npm run mock-llm     # pretend model servers on :11500 (OpenAI/Ollama style) and :11501 (Gemini)
 npm run demo         # the whole app on pretend models with sample data
 ```
@@ -333,8 +337,9 @@ What it is not, today:
 - **One person, one computer.** No accounts, no sync between devices, no sharing. To use it from a phone, host it somewhere you control (see [reverse proxy](#faq-and-troubleshooting)).
 - **No encryption at rest, no built-in HTTPS.** See [Security model](#security-model).
 - **Text only.** No images, audio recordings or attachments. Voice dictation turns speech into text through your browser.
-- **English interface.** The companion answers in the language you write in (checked on Spanish, French and Japanese with real models), but small local models are much weaker outside English.
+- **English interface, uneven language coverage.** The companion answers in the language you write in, and the closing reflection and weekly reflection are asked for in it, in ten languages (English, Spanish, French, German, Portuguese, Italian, Dutch, Japanese, Chinese, Korean). Only Spanish, French and Japanese were measured on real small models (the language was kept in every check); German, Portuguese and Italian were only side-checked, and the Dutch, Chinese and Korean wording was never run through a model and has not been reviewed by a native speaker. Text in other scripts (Cyrillic, Arabic, …) gets no language hint at all. Small local models are much weaker outside English.
 - **Small models are small.** A 360M model is not usable for journaling and a 1B model stays basic: it ends a reply with exactly one question only about 3 times in 4, now and then brings up things from your profile that do not belong, and its memory suggestions are mostly wrong. Review the Memory page, or prefer 1.7B and up (see [Tested with](#tested-with)).
+- **The on-screen keyboard is only simulated.** The page lifts the writing box above a phone's keyboard using the browser's `visualViewport`; that was checked with a simulated keyboard in Chromium, never on a real iOS or Android keyboard.
 - **Not everything was tried for real.** The OpenAI API, LM Studio and vLLM were not run (no access), no model of 3B or more was run, a Gemini rate-limit (`429`) was never provoked, and the app was exercised in Chromium on Linux only: Firefox, Safari, a real phone with its on-screen keyboard, macOS and Windows are untested.
 - **Search is keyword-based**, not semantic, and "related entries" use the same search.
 - **Import** understands MyJournal's own JSON export only.
@@ -348,17 +353,19 @@ Ideas that are not built (no promises): optional encryption at rest, importers f
 
 **"Port 3210 is already in use."** Is MyJournal already running? Pick another port: `PORT=3211 npm start`.
 
-**"MyJournal needs Node.js 22.13 or newer (this is v20.…)".** What `npm start` prints on an old Node. Install a current version from <https://nodejs.org> and run it again. (`npm run demo`, `npm test` and the other scripts do not check: on Node 20 or 21 they stop with `No such built-in module: node:sqlite`, which means the same thing.)
+**"MyJournal needs Node.js 22.16 or newer (this is v20.…)".** What `npm start`, `npm run dev`, `npm run demo`, `npm test` and `npm run test:e2e` print on an old Node (checked on a real Node 20.20.0). Install a current version from <https://nodejs.org> and run the command again. (`npm run dev` prints it and then waits for file changes: press Ctrl+C.) On a Node older than 20.11 (for example 18) npm itself first stops with `bad option: --disable-warning=ExperimentalWarning`, which means the same thing. "The SQLite inside this Node.js has no FTS5 full-text search" is the same problem on a Node that starts but is too old for the database (22.13 to 22.15, or any 23.x): use 22.16 or newer, or 24.
 
 **"Could not connect to the local model server" (Ollama connection refused).** Ollama is not running or the address is wrong. Start it (`ollama serve`, or open the Ollama app), then check **Settings → Local model**: the address is `http://localhost:11434/v1`. Inside Docker, `localhost` is the container itself: use `http://ollama:11434/v1` for the bundled Ollama or `http://host.docker.internal:11434/v1` for one on the host.
 
-**"That port is blocked."** Node's `fetch`, like web browsers, refuses to connect to a fixed list of ports (1, 7, 9, 6000, 6665 to 6669, 10080 and others; the "bad ports" of the Fetch standard) and the address in Settings uses one of them. Start your model server on another port and change the address. ("The server address is not valid" is a different problem: a typo in the address.)
+**"That port is blocked."** Node's `fetch`, like web browsers, refuses to connect to a fixed list of ports (1, 7, 9, 6000, 6665 to 6669, 10080 and others; the "bad ports" of the Fetch standard) and the address in Settings uses one of them. Start your model server on another port and change the address. (A typo in the address gives a different message: "That does not look like a valid web address." or "Could not find the server.")
 
 **"The model … was not found."** The name in Settings is not a model your server has. For Ollama run `ollama pull <name>` or press **Download model**; for others press **Load models** and pick one from the list.
 
 **"This conversation is too long for the model", or replies that ignore earlier text.** The model's context window is smaller than what is sent. Raise the window (Ollama: `OLLAMA_CONTEXT_LENGTH=8192`, llama.cpp: `-c`) and/or lower Settings → General → *Context budget*. Details: [docs/PROVIDERS.md](docs/PROVIDERS.md#context-windows-and-the-truncation-trap).
 
-**The first reply from a local model takes ages or times out.** The model is being loaded into memory. Give it time and raise *Wait for the first word* (Settings → General; the default is 180 seconds). **Test connection** waits as long as that setting says for a local model (up to 300 seconds), and 90 seconds for Gemini and OpenAI-compatible services; **Load models** waits 20 seconds. Giving up cancels the load, so retrying at once starts it over.
+**The first reply from a local model takes ages or times out.** The model is being loaded into memory. Give it time and raise *Wait for the first word* (Settings → General; the default is 180 seconds). **Test connection** waits as long as that setting says for a local model (up to 300 seconds), and 90 seconds for Gemini and OpenAI-compatible services; **Load models** waits 20 seconds. Giving up cancels the load, so retrying at once starts it over. While it waits, Test connection says so ("The first request after a model starts loads it into memory, which can take a minute. Please wait."). The setting stops at 300 seconds, because Node stops waiting for response headers then anyway.
+
+**"Could not find the server", or timeouts, for Gemini, OpenAI and other cloud services.** Check your internet connection and the address. Behind a company proxy Node ignores `HTTPS_PROXY` unless you start with `NODE_USE_ENV_PROXY=1` (see [above](#a-free-gemini-key)); you will then see a harmless `EnvHttpProxyAgent is experimental` warning in the terminal. **Test connection** waits at most 90 seconds and **Load models** 20 seconds whatever the timeout setting says.
 
 **Gemini: "rate limit reached" (429).** The free tier allows only so many requests per minute. Wait the number of seconds the message gives and try again. **"The free daily limit … is used up"** means try tomorrow, switch model, or enable billing.
 

@@ -139,18 +139,45 @@ test('a database with a NEWER user_version is refused with a clear error and lef
   }
 });
 
-test('a file that is not a database gives a clear open_failed error', () => {
+test('a file that is not a database gives a clear bad_file error and is left untouched', () => {
   const t = scratchDir('garbage');
   try {
     mkdirSync(join(t.dir, 'data'));
-    writeFileSync(t.file, 'this is definitely not a sqlite database, it is just text. '.repeat(100));
+    const text = 'this is definitely not a sqlite database, it is just text. '.repeat(100);
+    writeFileSync(t.file, text);
     assert.throws(
       () => openDb({ file: t.file }),
-      (err) => err instanceof DbError && err.code === 'open_failed' && err.message.includes(t.file),
+      (err) => err instanceof DbError && err.code === 'bad_file' && err.message.includes(t.file) && /not a readable MyJournal database/.test(err.message),
+    );
+    assert.equal(readFileSync(t.file, 'utf8'), text, 'the file is not modified');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('a SQLite file of another program (user_version 1, no entries table) is a bad_file error, not "no such table"', () => {
+  const t = scratchDir('foreign');
+  try {
+    mkdirSync(join(t.dir, 'data'));
+    const foreign = new DatabaseSync(t.file);
+    foreign.exec('CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); PRAGMA user_version = 1');
+    foreign.close();
+    assert.throws(
+      () => openDb({ file: t.file }),
+      (err) => err instanceof DbError && err.code === 'bad_file' && err.message.includes(t.file) && /not a MyJournal database \(no such table: entries\)/.test(err.message),
     );
   } finally {
     t.cleanup();
   }
+});
+
+test('a Node.js whose SQLite has no FTS5 gets a no_fts5 error that names the Node it runs on and the one to use', () => {
+  const stub = { exec() { throw new Error('no such module: fts5'); } };
+  assert.throws(
+    () => MIGRATIONS[0].up(stub),
+    (err) => err instanceof DbError && err.code === 'no_fts5'
+      && err.message.includes(`v${process.versions.node}`) && /Node\.js 22\.16 or newer \(not 23\.x\), or 24 or newer/.test(err.message) && !/22\.13/.test(err.message),
+  );
 });
 
 test('assertWritable passes on a normal database and leaves no transaction or change behind', () => {

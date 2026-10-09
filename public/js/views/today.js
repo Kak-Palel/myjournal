@@ -62,9 +62,10 @@ export default async function todayView(ctx) {
   /* ---------------------------------------------------------------- actions */
   // The entry's date is read when the writer submits, not when the view opened: a tab left open past
   // midnight must not stamp the new day's entry with yesterday's date.
-  async function startJournaling({ text, mood, prompt }) {
+  async function startJournaling({ text, mood, prompt, reply = true }) {
     const res = await api.post('/entries', newEntryBody({ text, mood, prompt, date: todayString() }), { signal });
-    app.navigate(`/entry/${encodeURIComponent(res.entry.id)}${app.aiReady() ? '?reply=1' : ''}`);
+    // `reply=1` is what asks the AI for a reply on arrival; "Save without reply" never sends the text to the provider.
+    app.navigate(`/entry/${encodeURIComponent(res.entry.id)}${reply && app.aiReady() ? '?reply=1' : ''}`);
   }
 
   async function pickTemplate(template) {

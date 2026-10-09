@@ -13,26 +13,69 @@ import {
 } from './text.js';
 
 // ------------------------------------------------------------------------------------------------
+// Bounding model output
+
+// The answer to the title and memory jobs is a handful of short lines (the model is asked for at most 160 tokens). Anything
+// beyond these limits is not an answer to the task. It is cut BEFORE the parsers below run, because model text is hostile
+// input: many of their regexes take quadratic time on a long run of one character (a 40,000-character line of `*` kept the
+// whole server busy for 17 s).
+const MAX_TASK_TEXT_CHARS = 20_000;
+const MAX_TASK_LINE_CHARS = 2000; // room for the whole answer on one line (a model that answers in JSON), far below what hurts
+const MAX_MEMORY_CANDIDATES = 30;
+
+/** `text` cut to MAX_TASK_TEXT_CHARS, every line to MAX_TASK_LINE_CHARS; '' for a non-string. */
+function boundTaskText(text) {
+  if (typeof text !== 'string') return '';
+  const head = text.length > MAX_TASK_TEXT_CHARS ? text.slice(0, MAX_TASK_TEXT_CHARS) : text;
+  const lines = head.split(/\r\n?|\n/);
+  let cut = false;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].length <= MAX_TASK_LINE_CHARS) continue;
+    // not between the halves of a surrogate pair
+    const end = /[\uD800-\uDBFF]/.test(lines[i][MAX_TASK_LINE_CHARS - 1]) ? MAX_TASK_LINE_CHARS - 1 : MAX_TASK_LINE_CHARS;
+    lines[i] = lines[i].slice(0, end);
+    cut = true;
+  }
+  return cut || head !== text ? lines.join('\n') : text;
+}
+
+// ------------------------------------------------------------------------------------------------
 // Shared cleaning
 
 const THINK_TAGS = 'think|thinking|thought|reasoning|reflection|scratchpad';
-const THINK_BLOCK_RE = new RegExp(`<(${THINK_TAGS})\\b[^>]*>[\\s\\S]*?</\\1\\s*>`, 'gi');
-const THINK_OPEN_RE = new RegExp(`<(?:${THINK_TAGS})\\b[^>]*>[\\s\\S]*$`, 'i');
-const THINK_CLOSE_RE = new RegExp(`^[\\s\\S]*</(?:${THINK_TAGS})\\s*>`, 'i');
+// The opening tag's attributes are bounded: model text is hostile, and `[^>]*` retried from every `<think ` of a long run is quadratic.
+const THINK_OPEN_RE = new RegExp(`<(${THINK_TAGS})\\b[^>]{0,200}>`, 'gi');
+const THINK_CLOSE_RES = new Map(THINK_TAGS.split('|').map((name) => [name, new RegExp(`</${name}\\s*>`, 'gi')]));
+const THINK_LAST_CLOSE_RE = new RegExp(`^[\\s\\S]*</(?:${THINK_TAGS})\\s*>`, 'i');
 
 /**
  * Remove reasoning blocks: `<think>...</think>` (and thinking / thought / reasoning), an unterminated
  * opening block (everything after it), and a lone closing tag (everything before it, which is how some
  * reasoning models start their output).
+ * One left-to-right scan: a lazy `<think>[\s\S]*?</think>` regex retried from every opening tag takes quadratic time on
+ * a hostile answer made of thousands of unclosed opening tags.
  * @param {unknown} text
  * @returns {string}
  */
 export function stripThinking(text) {
   if (typeof text !== 'string') return '';
-  let s = text.replace(THINK_BLOCK_RE, '');
-  s = s.replace(THINK_OPEN_RE, '');
-  s = s.replace(THINK_CLOSE_RE, '');
-  return s;
+  let kept = '';
+  let pos = 0;
+  while (pos < text.length) {
+    THINK_OPEN_RE.lastIndex = pos;
+    const open = THINK_OPEN_RE.exec(text);
+    if (!open) {
+      kept += text.slice(pos);
+      break;
+    }
+    kept += text.slice(pos, open.index);
+    const closeRe = THINK_CLOSE_RES.get(open[1].toLowerCase());
+    closeRe.lastIndex = open.index + open[0].length;
+    const close = closeRe.exec(text);
+    if (!close) break; // never closed: the rest is reasoning
+    pos = close.index + close[0].length;
+  }
+  return kept.replace(THINK_LAST_CLOSE_RE, '');
 }
 
 const START_TOKENS_RE = /^(?:\s*(?:<\|im_start\|>\s*(?:assistant|user|system)?|<\|start_header_id\|>\s*(?:assistant|user|system)?\s*<\|end_header_id\|>|<start_of_turn>\s*(?:model|user)?|<\|assistant\|>|<\|begin_of_text\|>|<s>|\[\/INST\]|<<\/?SYS>>))+/i;
@@ -51,12 +94,16 @@ function stripSpecialTokens(text) {
   return s.replace(STRAY_TOKEN_RE, '');
 }
 
+// A prefix such as "Assistant:" sits in the first few characters. Looking only at the head keeps the regex (whose leading
+// classes overlap) from taking quadratic time on a hostile run of `*` and spaces.
+const ROLE_PREFIX_WINDOW = 300;
+
 function stripRolePrefixes(text) {
   let s = text;
   for (let i = 0; i < 3; i += 1) {
-    const next = s.replace(ROLE_PREFIX_RE, '');
-    if (next === s) break;
-    s = next;
+    const match = ROLE_PREFIX_RE.exec(s.slice(0, ROLE_PREFIX_WINDOW));
+    if (!match || match[0].length === 0) break;
+    s = s.slice(match[0].length);
   }
   return s;
 }
@@ -107,10 +154,18 @@ export function cleanReply(text) {
   }
   const userTurn = USER_TURN_RE.exec(s);
   if (userTurn && userTurn.index > 0) s = s.slice(0, userTurn.index);
-  return s
-    .replace(/[ \t]+$/gm, '')
+  return trimLineEnds(s)
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+/** Spaces and tabs at the end of every line removed. (A `/[ \t]+$/gm` regex takes quadratic time on a long run of spaces inside a line.) */
+function trimLineEnds(text) {
+  return text.split('\n').map((line) => {
+    let end = line.length;
+    while (end > 0 && (line[end - 1] === ' ' || line[end - 1] === '\t')) end -= 1;
+    return end === line.length ? line : line.slice(0, end);
+  }).join('\n');
 }
 
 const REFUSAL_RE = /^\W*(?:i'?m sorry|i am sorry|sorry|i apologi[sz]e|i can(?:no|')t|i cannot|i can not|i'?m unable|i am unable|i'?m not able|i am not able|unfortunately,? i|as an ai|as a language model|i won'?t|i will not|i do not feel comfortable|i'?m not comfortable|lo siento|je suis désolé|es tut mir leid)\b/i;
@@ -316,9 +371,11 @@ for (const [field, names] of Object.entries(FIELD_ALIASES)) for (const n of name
 
 // A labelled line: optional bullet / number / heading marks, optional bold or quote around the label,
 // the label word, optional delimiter, the value.
-const LABEL_LINE_RE = /^[ \t>#*_\-•]*(?:\d+[.)]\s*)?[*_`"'[]*\s*(\p{L}[\p{L}-]{1,24})\s*[*_`"'\]]*\s*(?:\([^)\n]{0,40}\)\s*)?(:|：|=|\s[-–—]\s)?\s*[*_`"']*\s*(.*)$/u;
+// Every run here is bounded (a bullet, a number, some emphasis marks and spaces never need more than a handful of characters):
+// with open-ended `*` the overlapping classes take quadratic time on a hostile line of asterisks.
+const LABEL_LINE_RE = /^[ \t>#*_\-•]{0,16}(?:\d{1,3}[.)]\s{0,8})?[*_`"'[]{0,8}\s{0,8}(\p{L}[\p{L}-]{1,24})\s{0,8}[*_`"'\]]{0,8}\s{0,8}(?:\([^)\n]{0,40}\)\s{0,8})?(:|：|=|\s[-–—]\s)?\s{0,8}[*_`"']{0,8}\s{0,8}(.*)$/u;
 // The same for two-word labels such as "Краткое содержание".
-const LABEL_LINE_RE_TWO_WORDS = /^[ \t>#*_\-•]*(?:\d+[.)]\s*)?[*_`"'[]*\s*(\p{L}[\p{L}-]{1,24} \p{L}[\p{L}-]{1,24})\s*[*_`"'\]]*\s*(?:\([^)\n]{0,40}\)\s*)?(:|：|=|\s[-–—]\s)?\s*[*_`"']*\s*(.*)$/u;
+const LABEL_LINE_RE_TWO_WORDS = /^[ \t>#*_\-•]{0,16}(?:\d{1,3}[.)]\s{0,8})?[*_`"'[]{0,8}\s{0,8}(\p{L}[\p{L}-]{1,24} \p{L}[\p{L}-]{1,24})\s{0,8}[*_`"'\]]{0,8}\s{0,8}(?:\([^)\n]{0,40}\)\s{0,8})?(:|：|=|\s[-–—]\s)?\s{0,8}[*_`"']{0,8}\s{0,8}(.*)$/u;
 const BARE_LABEL_BAD_NEXT = /^(?:of|is|was|and|the|for|to|in|on|that|which|has|had|are|were|will|would|can|could|should|about|with|from|by|at|as)\b/i;
 
 function labelOfLine(line, lenient = false) {
@@ -520,7 +577,7 @@ function fallbackTitleFrom(fallbackTitle, firstMessage) {
  */
 export function parseMeta(text, { fallbackTitle = '', userText = '', firstMessage = '' } = {}) {
   const source = typeof userText === 'string' ? userText : '';
-  const cleaned = stripWrappingFence(stripSpecialTokens(stripThinking(cleanText(typeof text === 'string' ? text : '')))).trim();
+  const cleaned = stripWrappingFence(stripSpecialTokens(stripThinking(cleanText(boundTaskText(text))))).trim();
   const fromJson = parseJsonish(cleaned);
   let fromLines = parseLabelledLines(cleaned);
   if (Object.keys(fromLines).length < 2 && Object.keys(fromJson).length === 0) fromLines = parseLabelledLines(cleaned, true);
@@ -617,7 +674,7 @@ const EMOTION_STATE_RE = /^(?:is |was |feels? |felt |seems? |sounds? |appears? |
 // A "Has been ..." or "Has had a ..." fact is kept unless it is plainly a passing state: "Has been diagnosed with ADHD" and
 // "Has been a nurse for ten years" are lasting, "Has been feeling low" and "Has had a hard day" are not.
 const FEELING_STATE_RE = /^(?:se siente|se sent[ií]a|sinti[óo]|est[aá]|estaba|se sent|se sentait|f[üu]hlt sich|f[üu]hlte sich|sente-se|sentiu-se|has felt\b|has been (?:feeling|having an? |so |very |really |quite |a bit |a little |too )|has had an? (?:hard|bad|rough|tough|long|great|good|nice|lovely|terrible|awful|stressful|busy|quiet|lazy|difficult|productive|boring|slow|crazy|weird) (?:day|night|week|morning|afternoon|evening|weekend|time|start)\b|is struggling with (?:sleep|motivation) (?:lately|recently)|needs to (?:rest|relax|sleep|breathe|calm|vent|cry|slow down|unwind|recharge|take a break|take it easy)|wants to (?:rest|relax|sleep|vent|cry|unwind|recharge|take a break|take it easy)|needs (?:more |some |a lot of |lots of )?(?:sleep|rest|a break|a nap|a hug|a holiday|a vacation|space|time off|time|coffee|food|water|a drink|a day off)\b|wants (?:to )?(?:quit|give up|run away|scream|hide|escape|be alone|go home|go to bed|stay in bed|cry|vent)\b|wants (?:a break|out)\b)/i;
-const SENSITIVE_RE = /\b(?:password|passcode|pin code|api[ -]?key|secret key|token|ssn|social security|credit card|card number|iban)\b|sk-[A-Za-z0-9]{8,}|\b\d{8,}\b|[\w.+-]+@[\w-]+\.[\w.]+|https?:\/\//i;
+const SENSITIVE_RE = /\b(?:password|passcode|pin code|api[ -]?key|secret key|token|ssn|social security|credit card|card number|iban)\b|sk-[A-Za-z0-9]{8,}|\b\d{8,}\b|(?<![\w.+-])[\w.+-]+@[\w-]+\.[\w.]+|https?:\/\//i;
 
 // Lasting facts are states ("Works as a nurse", "Lives in Leeds"), not what the writer is busy with right now. A progressive
 // opening ("Is cooking a ratatouille", "Is planning to ask for Friday off", "Is waiting for someone") passes the allow-list of
@@ -883,12 +940,12 @@ function copiesEntry(fact, entry) {
  * @returns {string[]} at most 3 facts of at most 200 characters; [] for "none", "n/a", "no new facts"
  */
 export function parseMemoryLines(text, { existing = [], userText = '', userName = '' } = {}) {
-  const cleaned = cleanReply(text);
+  const cleaned = cleanReply(boundTaskText(text));
   if (cleaned === '') return [];
   const known = (Array.isArray(existing) ? existing : [])
     .map((e) => (typeof e === 'string' ? e : e && typeof e.text === 'string' ? e.text : ''))
     .filter(Boolean);
-  const lines = candidateLines(cleaned);
+  const lines = candidateLines(cleaned).slice(0, MAX_MEMORY_CANDIDATES);
   if (lines.length === 0) return [];
   const firstMeaningful = cleanValue(lines[0]).replace(FACT_PREFIX_RE, '');
   if (NONE_LINE_RE.test(firstMeaningful)) return [];

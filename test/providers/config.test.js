@@ -99,7 +99,9 @@ test('numbers are validated and clamped', () => {
   assert.equal(bad.maxTokens, undefined);
   assert.equal(bad.timeoutMs, PROVIDER_DEFAULTS.openai.timeoutMs);
   assert.equal(resolveProviderConfig('openai', settings({ temperature: 0 }), {}).temperature, 0);
-  assert.equal(resolveProviderConfig('openai', settings({ timeoutSec: 99999 }), {}).timeoutMs, 30 * 60 * 1000);
+  assert.equal(resolveProviderConfig('openai', settings({ timeoutSec: 99999 }), {}).timeoutMs, 300_000, 'never more than Node itself waits for response headers');
+  assert.equal(resolveProviderConfig('openai', settings({ timeoutSec: 301 }), {}).timeoutMs, 300_000);
+  assert.equal(resolveProviderConfig('openai', settings({ timeoutSec: 300 }), {}).timeoutMs, 300_000);
 });
 
 test('gemini defaults to the Flash-Lite alias with thinking "auto"; thinking is "low" only when explicitly "low"', () => {

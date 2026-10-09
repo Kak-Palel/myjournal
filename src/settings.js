@@ -35,7 +35,9 @@ export const SETTINGS_LIMITS = Object.freeze({
   temperature: Object.freeze({ min: 0, max: 2 }),
   maxTokens: Object.freeze({ min: 64, max: 8192 }),
   contextBudgetTokens: Object.freeze({ min: 500, max: 32000 }),
-  timeoutSec: Object.freeze({ min: 5, max: 600 }),
+  // 300, not more: Node's fetch gives up waiting for response headers after 300 s whatever we ask for (measured: a server
+  // that never answers fails after 300.9 s with UND_ERR_HEADERS_TIMEOUT), so a larger number could only mislead.
+  timeoutSec: Object.freeze({ min: 5, max: 300 }),
 });
 
 function deepFreeze(value) {

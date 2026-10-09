@@ -83,6 +83,8 @@ export function createComposer({ entryId, aiReady, hasMessages, handlers }) {
     if (draftRestored) parts.push(h('span', { class: 'entry-hint-item' }, 'Restored your unsent draft.'));
     if (!ready) {
       parts.push(h('span', { class: 'entry-hint-item' }, 'Journal-only mode. ', h('a', { href: '#/settings' }, 'Set up an AI companion'), ' for replies.'));
+      // The first message was saved when the entry began; an enabled "Save entry" under an empty box otherwise reads as "not saved yet".
+      if (messagesPresent && textarea.value.trim() === '') parts.push(h('span', { class: 'entry-hint-item' }, 'Everything you have written is saved.'));
     } else {
       parts.push(h('span', { class: 'entry-hint-item entry-hint-keys' }, h('kbd', { class: 'kbd' }, SHORTCUT_LABEL), ' to send'));
     }
@@ -102,7 +104,7 @@ export function createComposer({ entryId, aiReady, hasMessages, handlers }) {
 
     // Without an AI the one action is to save, so it becomes the primary button.
     save.hidden = generating && ready;
-    save.classList.toggle('btn-primary', !ready);
+    save.classList.toggle('btn-primary', !ready && textarea.value.trim() !== ''); // nothing typed: nothing to press it for
     save.querySelector('.entry-long').textContent = ready ? 'Save without reply' : 'Save entry';
     save.querySelector('.entry-short').textContent = 'Save';
     save.setAttribute('aria-label', ready ? 'Save without reply' : 'Save entry');
@@ -124,6 +126,7 @@ export function createComposer({ entryId, aiReady, hasMessages, handlers }) {
     draftRestored = false;
     saver.save(textarea.value);
     paintCount();
+    paintHint();
     paintState();
   });
 
@@ -165,7 +168,7 @@ export function createComposer({ entryId, aiReady, hasMessages, handlers }) {
     setBusy(next) { busy = next; paintState(); },
     setAiReady(next) { ready = next; paintHint(); paintState(); },
     setCanWrap(next, isWrapped = false) { canWrap = next; wrapped = isWrapped; paintState(); },
-    setHasMessages(next) { messagesPresent = next; paintState(); },
+    setHasMessages(next) { messagesPresent = next; paintHint(); paintState(); },
     destroy() {
       saver.flush();
       if (voice) voice.destroy();

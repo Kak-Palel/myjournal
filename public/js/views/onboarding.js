@@ -12,8 +12,9 @@ import { envKeysFound, envKeyBadgeText } from '../components/settings-logic.js';
 const ENV_LOOKUP_MS = 700;
 
 /**
- * Which providers already have a key in the server's environment (GET /api/providers, `keySource: 'env'`). Best effort: any
- * failure or delay just means no badges. Only the variable's name is ever shown, never the key.
+ * Which providers already have a key in the server's environment (GET /api/providers, `keySource: 'env'`), with the name of the
+ * variable that holds it (`keyEnvName`, so GOOGLE_API_KEY is named as such). Best effort: any failure or delay just means no
+ * badges. Only the variable's name is ever shown, never the key.
  * @returns {Promise<Record<string, string>>}
  */
 async function lookUpEnvKeys(signal) {
@@ -104,7 +105,7 @@ export default async function onboardingView(ctx) {
 
   function card(c) {
     // A key the server already has (GEMINI_API_KEY, OPENAI_API_KEY): say so, and the choice then leads to a one-step setup.
-    const found = envKeys[c.id] ? h('p', { class: 'onboarding-env', id: `onboarding-env-${c.id}` }, icon('key', { size: 16 }), h('span', null, envKeyBadgeText(c.id))) : null;
+    const found = envKeys[c.id] ? h('p', { class: 'onboarding-env', id: `onboarding-env-${c.id}` }, icon('key', { size: 16 }), h('span', null, envKeyBadgeText(c.id, envKeys[c.id]))) : null;
     const btn = h('button', {
       type: 'button', class: 'btn onboarding-choose', 'aria-describedby': found ? found.id : null, onClick: () => choose(c.id, btn),
     }, c.cta, icon('chevron-right', { size: 18 }));

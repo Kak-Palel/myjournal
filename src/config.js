@@ -163,18 +163,47 @@ export function assertSafeToStart(config) {
 }
 
 /**
- * Load a `.env` file with process.loadEnvFile(). Variables that are already set in the environment win.
- * A missing file is normal; a file that cannot be read is reported, not fatal.
- * @param {{ cwd?: string, file?: string, loader?: (path: string) => void }} [options]
- * @returns {{ loaded: boolean, path: string, error?: string }}
+ * A `JOURNAL_PASSWORD=` line that Node's .env reader cuts short: an unquoted `#` starts a comment there, so
+ * `JOURNAL_PASSWORD=correct horse #1 staple` becomes "correct horse" and nobody notices. Returns the sentence
+ * to print, or null.
+ * @param {string} text contents of a .env file
+ * @returns {string|null}
  */
-export function loadDotEnv({ cwd = process.cwd(), file = '.env', loader = process.loadEnvFile.bind(process) } = {}) {
+export function dotEnvPasswordWarning(text) {
+  for (const line of String(text).split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?JOURNAL_PASSWORD\s*=\s*(.*)$/.exec(line);
+    if (!match) continue;
+    const value = match[1];
+    if (/^["'`]/.test(value) || !value.includes('#')) return null;
+    const length = value.slice(0, value.indexOf('#')).trim().length;
+    return 'the JOURNAL_PASSWORD line of your .env file contains a #. Node ends an unquoted value at a #, so the password is '
+      + `only ${length} character${length === 1 ? '' : 's'} long. Put the password in single quotes: JOURNAL_PASSWORD='...'.`;
+  }
+  return null;
+}
+
+/**
+ * Load a `.env` file with process.loadEnvFile(). Variables that are already set in the environment win.
+ * A missing file is normal; a file that cannot be read is reported, not fatal. `warning` is set when the file's
+ * JOURNAL_PASSWORD would be silently shortened (and the real environment does not supply the password itself).
+ * @param {{ cwd?: string, file?: string, loader?: (path: string) => void, env?: Record<string,string|undefined> }} [options]
+ * @returns {{ loaded: boolean, path: string, error?: string, warning?: string }}
+ */
+export function loadDotEnv({ cwd = process.cwd(), file = '.env', loader = process.loadEnvFile.bind(process), env = process.env } = {}) {
   const path = resolve(cwd, file);
   if (!existsSync(path)) return { loaded: false, path };
+  const passwordFromEnvironment = env.JOURNAL_PASSWORD !== undefined;
   try {
     loader(path);
-    return { loaded: true, path };
   } catch (err) {
     return { loaded: false, path, error: err && err.message ? err.message : String(err) };
   }
+  const result = { loaded: true, path };
+  if (!passwordFromEnvironment) {
+    try {
+      const warning = dotEnvPasswordWarning(readFileSync(path, 'utf8'));
+      if (warning) result.warning = warning;
+    } catch { /* the warning is a courtesy */ }
+  }
+  return result;
 }

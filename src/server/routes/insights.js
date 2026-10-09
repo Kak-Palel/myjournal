@@ -20,6 +20,7 @@ export function register(router, { db, gen }) {
 
   router.add('DELETE', '/insights/reports/:id', (ctx) => {
     if (!db.reports.delete(idParam(ctx.params.id, 'report'))) throw notFound('No such report.');
+    db.scrub();
     ctx.noContent();
   });
 

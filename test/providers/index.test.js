@@ -5,7 +5,7 @@ import {
   ERROR_CODES, PROVIDER_DEFAULTS, PROVIDER_IDS, ProviderError, createProvider, describeProviders, isOllama, pullOllamaModel,
   resolveProviderConfig,
 } from '../../src/providers/index.js';
-import { ENV_KEY_NAMES } from '../../src/env-keys.js';
+import { ENV_KEY_NAMES, envKeyVariable, effectiveApiKey } from '../../src/env-keys.js';
 import { createMockGemini } from '../mocks/mock-gemini.js';
 import { createMockOpenAI } from '../mocks/mock-openai.js';
 import { HELLO, drain } from './helpers.js';
@@ -53,7 +53,7 @@ test('describeProviders: one complete row per provider, in a stable order', () =
   const rows = describeProviders({});
   assert.deepEqual(rows.map((r) => r.id), ['gemini', 'openai', 'local']);
   for (const row of rows) {
-    for (const key of ['id', 'label', 'tagline', 'description', 'needsKey', 'defaultBaseUrl', 'defaultModel', 'privacyNote', 'suggestedModels', 'keySource']) {
+    for (const key of ['id', 'label', 'tagline', 'description', 'needsKey', 'defaultBaseUrl', 'defaultModel', 'privacyNote', 'suggestedModels', 'keySource', 'keyEnvName']) {
       assert.ok(key in row, `${row.id}.${key}`);
     }
     assert.ok(!('configured' in row), 'the server adds `configured`');
@@ -93,8 +93,17 @@ test('describeProviders: catalog copy from the architecture document', () => {
   assert.deepEqual(Object.fromEntries(local.presets.map((p) => [p.label, p.baseUrl])), {
     Ollama: 'http://localhost:11434/v1', 'llama.cpp': 'http://localhost:8080/v1', 'LM Studio': 'http://localhost:1234/v1',
   });
-  assert.deepEqual(local.suggestedModels.map((m) => m.id), ['llama3.2:1b', 'qwen2.5:1.5b', 'gemma2:2b', 'llama3.2:3b', 'smollm2:1.7b']);
-  assert.match(local.suggestedModels[0].note, /1\.3 GB/);
+  // Order and honesty (ARCHITECTURE section 9, catalog copy): recommended first, then the best model we measured, then the
+  // 1B floor, then the models nobody here ran, which say so. smollm2:360m (plumbing tests only) is never suggested.
+  assert.deepEqual(local.suggestedModels.map((m) => m.id), ['llama3.2:3b', 'qwen3:1.7b', 'llama3.2:1b', 'qwen2.5:1.5b', 'gemma2:2b', 'smollm2:1.7b']);
+  assert.deepEqual(local.suggestedModels.slice(0, 3).map((m) => m.label), ['Llama 3.2 3B', 'Qwen 3 1.7B', 'Llama 3.2 1B']);
+  assert.match(local.suggestedModels[0].note, /recommended/i);
+  assert.deepEqual(local.suggestedModels[1], { id: 'qwen3:1.7b', label: 'Qwen 3 1.7B', note: 'Best small model we measured' });
+  assert.match(local.suggestedModels[2].note, /basic/i);
+  for (const m of local.suggestedModels.slice(3)) assert.match(m.note, /not measured by us/i, `${m.id} was not measured`);
+  for (const m of local.suggestedModels.slice(0, 3)) assert.doesNotMatch(m.note, /not measured/i, `${m.id} was measured or is the recommendation`);
+  assert.ok(!local.suggestedModels.some((m) => /smollm2:360m/.test(m.id)), 'the 360M model is for plumbing tests only and is never suggested');
+  assert.equal(local.suggestedModels[0].id, local.defaultModel, 'the recommended model is the default one');
   assert.equal(gemini.presets.length, 0);
   // every preset URL is a valid base URL for the adapter
   for (const row of [openai, local]) for (const p of row.presets) assert.doesNotThrow(() => new URL(p.baseUrl));
@@ -112,12 +121,42 @@ test('describeProviders: keySource reflects only the environment; the key itself
   for (const [id, names] of Object.entries(ENV_KEY_NAMES)) assert.ok(names.length > 0, id);
 });
 
+test('describeProviders: keyEnvName is the NAME of the variable that supplies the key, never its value', () => {
+  const secret = 'AIza-super-secret-value-123456';
+  const names = (env) => describeProviders(env).map((r) => r.keyEnvName);
+  assert.deepEqual(names({}), ['', '', ''], 'no key in the environment: empty string, not undefined');
+  assert.deepEqual(names({ GEMINI_API_KEY: secret, OPENAI_API_KEY: 'sk-another-secret-value' }), ['GEMINI_API_KEY', 'OPENAI_API_KEY', '']);
+  assert.deepEqual(names({ GOOGLE_API_KEY: secret }), ['GOOGLE_API_KEY', '', ''], 'GOOGLE_API_KEY is named when it is the one that is set');
+  assert.deepEqual(names({ GEMINI_API_KEY: 'first-key-value', GOOGLE_API_KEY: 'second-key-value' }), ['GEMINI_API_KEY', '', ''], 'the first variable that is set wins, as for the key itself');
+  assert.deepEqual(names({ GEMINI_API_KEY: '   ', GOOGLE_API_KEY: 'second-key-value' }), ['GOOGLE_API_KEY', '', ''], 'a blank variable is not set');
+  assert.deepEqual(names({ LOCAL_LLM_API_KEY: 'k-local' }), ['', '', 'LOCAL_LLM_API_KEY']);
+  assert.deepEqual(names({ GEMINI_API_KEY: '' }), ['', '', '']);
+  assert.ok(!JSON.stringify(describeProviders({ GOOGLE_API_KEY: secret })).includes(secret), 'the value is not in any row');
+  // always agrees with keySource and with the key that effectiveApiKey would use
+  for (const env of [{}, { GOOGLE_API_KEY: 'g-key' }, { GEMINI_API_KEY: 'a', GOOGLE_API_KEY: 'b' }, { OPENAI_API_KEY: 'o' }]) {
+    for (const row of describeProviders(env)) {
+      assert.equal(row.keyEnvName !== '', row.keySource === 'env', `${row.id} ${JSON.stringify(env)}`);
+      if (row.keyEnvName) assert.equal(env[row.keyEnvName], effectiveApiKey(row.id, '', env).key);
+    }
+  }
+});
+
+test('envKeyVariable: names the first variable of ENV_KEY_NAMES that is set; unknown providers and non-strings give an empty string', () => {
+  assert.equal(envKeyVariable('gemini', { GOOGLE_API_KEY: 'x' }), 'GOOGLE_API_KEY');
+  assert.equal(envKeyVariable('gemini', { GEMINI_API_KEY: 'x', GOOGLE_API_KEY: 'y' }), 'GEMINI_API_KEY');
+  assert.equal(envKeyVariable('openai', { GEMINI_API_KEY: 'x' }), '', 'another provider\'s variable does not count');
+  assert.equal(envKeyVariable('nope', { GEMINI_API_KEY: 'x' }), '');
+  assert.equal(envKeyVariable('gemini', { GEMINI_API_KEY: 42 }), '');
+  assert.equal(envKeyVariable('gemini', {}), '');
+});
+
 test('describeProviders returns fresh copies each call', () => {
   const a = describeProviders({});
   a[0].suggestedModels.push({ id: 'junk', label: 'junk' });
   a[1].presets.length = 0;
   const b = describeProviders({});
   assert.equal(b[0].suggestedModels.length, 4);
+  assert.equal(b[2].suggestedModels.length, 6);
   assert.equal(b[1].presets.length, 4);
 });
 

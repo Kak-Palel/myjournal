@@ -329,8 +329,8 @@ export function createGeminiProvider(rawCfg, opts = {}) {
     if (cfg.apiKey) h['x-goog-api-key'] = cfg.apiKey;
     return h;
   };
-  const newScope = (signal, url, firstByteMs) => createScope({
-    signal, firstByteMs, idleMs, ctx: { provider: 'gemini', secrets, url },
+  const newScope = (signal, url, firstByteMs, fixedWait = cfg.timeoutCapped === true) => createScope({
+    signal, firstByteMs, idleMs, ctx: { provider: 'gemini', secrets, url, fixedWait },
   });
   const errorCtx = (url) => ({ secrets, model: cfg.model, url });
   const quirkKey = (base) => `gemini|${base}|${bareModelId(cfg.model)}|${mode}`;
@@ -502,7 +502,7 @@ export function createGeminiProvider(rawCfg, opts = {}) {
     for (let page = 0; page < MAX_MODEL_PAGES; page += 1) {
       const query = `?pageSize=1000${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ''}`;
       const url = `${base}/v1beta/models${query}`;
-      const scope = newScope(signal, url, Math.min(cfg.timeoutMs, LIST_TIMEOUT_MS));
+      const scope = newScope(signal, url, Math.min(cfg.timeoutMs, LIST_TIMEOUT_MS), cfg.timeoutCapped === true || cfg.timeoutMs > LIST_TIMEOUT_MS);
       let json = null;
       try {
         const { response } = await sendWithPolicy({

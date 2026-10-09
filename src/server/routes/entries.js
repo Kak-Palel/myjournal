@@ -10,7 +10,8 @@ import {
 } from '../validate.js';
 
 const MAX_MESSAGE_CHARS = 20_000;
-const MAX_SEARCH_RESULTS = 50;
+const MAX_SEARCH_RESULTS = 50; // per page
+const MAX_SEARCH_DEPTH = 500; // the best 500 matches can be paged through; a search that needs more is too broad
 const TIE_BATCH = 200;
 
 /**
@@ -85,10 +86,16 @@ export function register(router, { db, gen, generations }) {
     };
     const q = queryText(query, 'q', 500);
     if (q) {
-      const hits = db.search(q, { limit: Math.min(limit, MAX_SEARCH_RESULTS), includePrivate: true, ...filters });
+      // Ranked results are paged by position: `offset` skips the best hits already shown, `nextOffset` is where the next page
+      // starts (null at the end, or when the 500 best matches have been shown). One hit more than a page is asked for to know.
+      const pageSize = Math.min(limit, MAX_SEARCH_RESULTS);
+      const offset = queryInt(query, 'offset', { min: 0, max: MAX_SEARCH_DEPTH, fallback: 0 });
+      const found = db.search(q, { limit: pageSize + 1, offset, includePrivate: true, ...filters });
+      const hits = found.slice(0, pageSize);
       const snippets = new Map(hits.map((h) => [h.entryId, h.snippet]));
       const entries = db.entries.summariesFor(hits.map((h) => h.entryId)).map((row) => ({ ...row, snippet: snippets.get(row.id) ?? '' }));
-      ctx.json({ entries, nextBefore: null });
+      const nextOffset = found.length > pageSize && offset + pageSize < MAX_SEARCH_DEPTH ? offset + pageSize : null;
+      ctx.json({ entries, nextBefore: null, nextOffset });
       return;
     }
     const page = pageWithWholeTies({
@@ -160,6 +167,7 @@ export function register(router, { db, gen, generations }) {
     const id = idParam(ctx.params.id, 'entry');
     generations.abort(entryLockKey(id)); // a reply still being written has nowhere to go
     if (!db.entries.delete(id)) throw notFound('No such entry.');
+    db.scrub(); // the text must not stay readable in the database files until the next checkpoint
     ctx.noContent();
   });
 
@@ -182,6 +190,7 @@ export function register(router, { db, gen, generations }) {
     const entry = entryOr404(ctx.params.id);
     const message = messageOr404(entry.id, ctx.params.mid);
     db.messages.delete(message.id);
+    db.scrub();
     ctx.json({ entry: db.entries.get(entry.id) });
   });
 

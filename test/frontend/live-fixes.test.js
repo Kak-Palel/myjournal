@@ -274,7 +274,7 @@ describe('isModelInstalled', () => {
 /* ============================================================ privacy wording */
 describe('privacy wording matches what the app really does', () => {
   test('a reply sends everything docs/PRIVACY.md lists, and says nothing else is sent', () => {
-    for (const part of ['current conversation', 'today\'s date', 'your name and "About you" text', 'memories', 'mood', 'guided session', 'Recall related past entries', 'never private ones', 'nothing else']) {
+    for (const part of ['current conversation', 'today\'s date', 'your name and “About you” text', 'companion\'s style', 'description you wrote', 'memories', 'mood', 'guided session', 'Recall related past entries', 'never private ones', 'nothing else']) {
       assert.ok(DATA_SENT_WITH_A_REPLY.includes(part), `the Data tab says: ${part}`);
     }
     assert.ok(DATA_SENT_WITH_A_REPLY.startsWith('Nothing leaves your computer unless the AI companion is on.'));

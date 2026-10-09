@@ -19,7 +19,11 @@ export function register(router, { db }) {
     ctx.json({ memory }, 201);
   });
 
-  router.add('POST', '/memories/clear', (ctx) => ctx.json({ ok: true, removed: db.memories.clear() }));
+  router.add('POST', '/memories/clear', (ctx) => {
+    const removed = db.memories.clear();
+    db.scrub();
+    ctx.json({ ok: true, removed });
+  });
 
   router.add('PATCH', '/memories/:id', async (ctx) => {
     const id = idParam(ctx.params.id, 'memory');
@@ -36,6 +40,7 @@ export function register(router, { db }) {
 
   router.add('DELETE', '/memories/:id', (ctx) => {
     if (!db.memories.delete(idParam(ctx.params.id, 'memory'))) throw notFound('No such memory.');
+    db.scrub();
     ctx.noContent();
   });
 }

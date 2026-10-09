@@ -2,7 +2,7 @@
 // highlights are <mark> elements built from highlightSegments(), never from markup strings.
 import { h } from '../lib/dom.js';
 import { icon, moodFace, formatDate, formatTime, MOODS } from '../lib/ui.js';
-import { entryTitle, highlightSegments, previewText } from './history-format.js';
+import { cardTexts, highlightSegments } from './history-format.js';
 import { wordsLabel } from './entry-text.js';
 
 /** Text and <mark> nodes for `text` with the search terms highlighted. */
@@ -33,8 +33,7 @@ function chips(entry, onTag) {
  */
 export function renderEntryCard(entry, { terms = [], compact = false, onTag } = {}) {
   const mood = MOODS.find((m) => m.value === entry.mood);
-  const title = entryTitle(entry);
-  const excerpt = previewText(entry);
+  const { title, excerpt } = cardTexts(entry);
 
   const moodEl = h('span', { class: ['hcard-mood', mood ? '' : 'is-none'], style: mood ? { '--history-mood': mood.color } : null }, mood ? moodFace(entry.mood) : icon('pen', { size: 16 }));
   const meta = [

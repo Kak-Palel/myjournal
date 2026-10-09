@@ -577,3 +577,40 @@ test('deleting an entry overwrites its text (secure_delete)', () => {
     t.cleanup();
   }
 });
+
+// secure_delete zeroes the freed pages, but they sit in the write-ahead log (and the old index words in old segments) until a
+// checkpoint: a deleted entry stayed readable in journal.db until the server stopped cleanly, and in journal.db-wal after a crash.
+test('scrub() makes just-deleted text unreadable in the files at once, without closing', () => {
+  const t = scratchDir('scrub');
+  try {
+    const db = openDb({ file: t.file });
+    const dir = join(t.dir, 'data');
+    bigJournal(db, 'scrubq', 30);
+    const doomed = entryWith(db, ['my diary says scrubzdoomedbody and scrubzdoomedshared'], { title: 'scrubztitle', tags: ['scrubztag'] });
+    const memory = db.memories.create({ text: 'scrubzdoomed memory' });
+    const report = db.reports.create({ periodStart: '2026-10-01', periodEnd: '2026-10-07', content: 'scrubzdoomed report' });
+    db.handle.exec('PRAGMA wal_checkpoint(TRUNCATE)'); // everything is now in the main file
+    const tokens = ['scrubzdoomedbody', 'scrubzdoomedshared', 'scrubztitle', 'scrubztag', 'scrubzdoomed memory', 'scrubzdoomed report'];
+    assert.equal(leftovers(dir, tokens).length >= 4, true, 'the setup must put the text in the file');
+
+    db.entries.delete(doomed.id);
+    db.memories.delete(memory.id);
+    db.reports.delete(report.id);
+    assert.ok(leftovers(dir, tokens).length > 0, 'before scrub() the deleted text is still in the file (that is what scrub() fixes)');
+
+    db.scrub();
+    assert.deepEqual(leftovers(dir, tokens), []);
+    assert.equal(db.search('scrubq').length > 0, true, 'the index of the other entries still works');
+    assert.deepEqual(db.search.checkConsistency().problems, []);
+    db.close();
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('scrub() is harmless on an in-memory database and inside nothing', () => {
+  const db = memDb();
+  entryWith(db, ['hello']);
+  assert.doesNotThrow(() => db.scrub());
+  db.close();
+});

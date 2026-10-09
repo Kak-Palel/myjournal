@@ -6,14 +6,18 @@ import { api, ApiError } from '../lib/api.js';
 import { icon, toast, inlineCode } from '../lib/ui.js';
 import { ollamaCommands, describeSmallModel, pullProgress, describePullFailure, isModelInstalled } from './settings-logic.js';
 import { commandBlock, externalLink, notice, uid, handFocus, setActionable } from './settings-ui.js';
+import { smallModelWarning } from './small-model-note.js';
 
 /**
  * Build the three extra blocks of the Local tab and attach them to the provider form's slots.
- * @param {{ form: object, info: object, signal: AbortSignal }} opts `form` is the object returned by createProviderForm
+ * @param {{ form: object, info: object, signal: AbortSignal, app?: object }} opts `form` is the object returned by createProviderForm;
+ *   `app` (the view's app object) lets the small-model warning follow the saved settings
  */
-export function attachLocalExtras({ form, info, signal }) {
+export function attachLocalExtras({ form, info, signal, app }) {
   form.slots.intro.append(buildQuickStart(form));
-  form.slots.afterModel.append(buildPicker(form, info), buildDownload(form, signal));
+  // The warning sits between the picker and the download: a 1B model is a fine thing to pick, but its memory notes need a look now and then.
+  const warning = app ? [smallModelWarning(app, { signal, link: true }).el] : [];
+  form.slots.afterModel.append(buildPicker(form, info), ...warning, buildDownload(form, signal));
 }
 
 /* ------------------------------------------------------------ quick start */
@@ -85,7 +89,7 @@ function buildPicker(form, info) {
   return h('div', { class: 'settings-picker stack-sm' },
     h('h3', { class: 'settings-subtitle' }, 'Pick a small model'),
     h('p', { class: 'muted small' },
-      '1B models are for testing the plumbing: they connect and reply, but the conversation stays basic. 3B and up feel noticeably more thoughtful. Bigger models need more memory.'),
+      'Very small models (under 1B) are only for checking that everything is connected. 1B models reply but stay basic; of the models we measured, about 1.7B (Qwen 3) was the best, and 3B and up should feel more thoughtful. Bigger models need more memory.'),
     cards);
 }
 

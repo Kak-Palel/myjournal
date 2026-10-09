@@ -1,6 +1,7 @@
 // Schema and migrations. The schema version lives in PRAGMA user_version; each migration runs
 // in its own immediate transaction, so a crash never leaves a half-migrated database.
 
+import { MIN_NODE } from '../server/node-version.js'; // import-free on purpose: it is the one place that names the supported Node.js
 import { DbError } from './util.js';
 
 const V1 = `
@@ -89,7 +90,12 @@ export const MIGRATIONS = [
         handle.exec(V1);
       } catch (err) {
         if (/fts5/i.test(String(err && err.message))) {
-          throw new DbError('open_failed', 'This Node.js build of SQLite has no FTS5 full-text search, which MyJournal needs. Use Node 22.13 or newer.', { cause: err });
+          throw new DbError(
+            'no_fts5',
+            `The SQLite inside this Node.js (v${process.versions.node}) has no FTS5 full-text search, which MyJournal needs. `
+              + `Use Node.js ${MIN_NODE.major}.${MIN_NODE.minor} or newer (not 23.x), or 24 or newer.`,
+            { cause: err },
+          );
         }
         throw err;
       }

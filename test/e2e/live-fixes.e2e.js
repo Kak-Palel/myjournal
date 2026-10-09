@@ -122,8 +122,8 @@ describe('privacy wording', () => {
     await page.getByRole('heading', { name: 'Where your data lives' }).waitFor();
     const paragraph = page.getByText(/^Nothing leaves your computer unless the AI companion is on\./);
     const text = await paragraph.innerText();
-    for (const part of ['the current conversation', 'today\'s date', 'your name and "About you" text', 'your memories', 'the mood you logged', 'a guided session\'s instructions',
-      'if "Recall related past entries" is on', 'short excerpts of older entries (never private ones)', 'to the provider you chose, and nothing else.']) {
+    for (const part of ['the current conversation', 'today\'s date', 'your name and “About you” text', 'your companion\'s style', 'your memories', 'the mood you logged', 'a guided session\'s instructions',
+      'if “Recall related past entries” is on', 'short excerpts of older entries (never private ones)', 'to the provider you chose, and nothing else.']) {
       assert.ok(text.includes(part), `says: ${part}\n  got: ${text}`);
     }
   }));

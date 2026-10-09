@@ -244,7 +244,10 @@ html { scroll-padding-top: var(--conn-h, 0px); }
 }
 .btn:hover { background: var(--surface-2); color: var(--text); }
 .btn:active { transform: translateY(1px); }
-.btn[disabled], .btn.is-loading { opacity: 0.6; cursor: not-allowed; pointer-events: none; }
+.btn[disabled] { opacity: 0.6; cursor: not-allowed; pointer-events: none; }
+/* A busy button is told apart by its spinner and the progress cursor, not by dimming: at opacity 0.6 the label of an ordinary button fell to
+   4.05:1 and a primary one to 3.3:1 (axe color-contrast), and unlike a disabled button a busy one is not exempt. */
+.btn.is-loading { cursor: progress; pointer-events: none; }
 .btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-contrast); }
 .btn-primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); color: var(--primary-contrast); }
 .btn-ghost { background: transparent; border-color: transparent; }
@@ -300,6 +303,9 @@ button.chip:hover { border-color: var(--border-strong); }
 .notice-warn > .icon { color: var(--warn); }
 .notice-success { background: var(--success-soft); }
 .notice-success > .icon { color: var(--success); }
+/* the small-model warning (components/small-model-note.js) is an always-present container that is empty most of the time */
+.small-model-warning:empty { display: none; }
+.small-model-warning .notice-body p { margin: 0; }
 
 /* ------------------------------------------------------------------- mood */
 .mood-face { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 1.1em; }

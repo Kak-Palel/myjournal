@@ -13,8 +13,24 @@ function fail(message, hint) {
   process.exit(1);
 }
 
+/** What to try next for a database that would not open: the right advice depends on why. */
+function databaseHint(err, config) {
+  switch (err.code) {
+    case 'schema_too_new':
+      return 'Update MyJournal, or point JOURNAL_DATA_DIR at another folder.';
+    case 'no_fts5':
+      return 'Install a newer Node.js from https://nodejs.org and run npm start again. Your journal file was not touched.';
+    case 'bad_file':
+      return 'MyJournal has not changed that file. Restore a backup of it (a copy of the data folder, or import an export from Settings > Data into a new journal), '
+        + 'or move the file away to start a new journal. Do not delete it if it holds anything you still need.';
+    default:
+      return `Check that the folder ${config.dataDir} exists and is writable.`;
+  }
+}
+
 async function main() {
-  const tooOld = nodeVersionProblem();
+  // `npm run dev` should say "run npm run dev again", everything else (npm start, node server.js) "npm start".
+  const tooOld = nodeVersionProblem(undefined, { command: process.env.npm_lifecycle_event === 'dev' ? 'npm run dev' : 'npm start' });
   if (tooOld) {
     process.stderr.write(`\n${tooOld}\n\n`);
     process.exit(1);
@@ -31,6 +47,7 @@ async function main() {
   ignoreStdioErrors(); // `npm start | head` must not take the server down with an EPIPE
   const dotenv = loadDotEnv();
   if (dotenv.error) process.stderr.write(`warning: could not read ${dotenv.path}: ${dotenv.error}\n`);
+  if (dotenv.warning) process.stderr.write(`warning: ${dotenv.warning}\n`);
 
   let config;
   try {
@@ -66,7 +83,7 @@ async function main() {
   try {
     db = openDb({ file: config.dbFile });
   } catch (err) {
-    if (err instanceof DbError) fail(err.message, err.code === 'schema_too_new' ? 'Update MyJournal, or point JOURNAL_DATA_DIR at another folder.' : `Check that the folder ${config.dataDir} exists and is writable.`);
+    if (err instanceof DbError) fail(err.message, databaseHint(err, config));
     throw err;
   }
 

@@ -13,7 +13,7 @@ import { TASK_SAMPLING, buildMemoryMessages, buildMetaMessages, buildReplyMessag
 import { addDays } from '../journal/dates.js';
 import { crisisNotice, detectCrisis } from '../journal/safety.js';
 import { cleanReply, parseMemoryLines, parseMeta } from '../journal/tasks.js';
-import { extractKeywords, firstWords } from '../journal/text.js';
+import { extractKeywords, firstWords, splitSentences } from '../journal/text.js';
 import { DbError } from '../db/index.js';
 import { ProviderError, errorPayload, isAbortError } from '../providers/index.js';
 import { HttpError, conflict, notFound, openSse } from './http.js';
@@ -63,6 +63,90 @@ export function createGenerationManager() {
     },
     get size() {
       return locks.size;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// One question per reply (REPLY ONLY: wrap-up and weekly share cleanReply, never this)
+
+// "?" (or the full-width one of Japanese and Chinese), optionally followed by closing quotes, brackets or markdown emphasis.
+const QUESTION_END = /[?\uFF1F][\s"'\u201D\u2019\u00BB)\]*_~`]*$/u;
+const BLANK_LINE = /\n[ \t]*\n\s*/g;
+const STREAM_WINDOW = 4000; // characters of a streamed reply inspected per chunk
+const LIST_OR_HEADING = /^(?:[-*\u2022+#>]|\d{1,3}[.)])\s/u;
+
+/** The last paragraph of `text`, the one before it and where the blank line between them starts; null for a single paragraph. */
+function lastParagraph(text) {
+  let last = null;
+  let before = null;
+  for (const m of text.matchAll(BLANK_LINE)) {
+    before = last;
+    last = m;
+  }
+  if (!last) return null;
+  const prevStart = before ? before.index + before[0].length : 0;
+  return { cut: last.index, prev: text.slice(prevStart, last.index), tail: text.slice(last.index + last[0].length) };
+}
+
+/** One line, one sentence, not a list item or a heading. */
+const isLoneSentence = (paragraph) => !paragraph.includes('\n') && !LIST_OR_HEADING.test(paragraph) && splitSentences(paragraph).length === 1;
+
+/**
+ * Small models sometimes follow their question with a second one in a paragraph of its own (qwen3:1.7b ended with exactly
+ * one question in only 78 of 85 replies). The rule asks for ONE: when the reply has two or more paragraphs, the last is a
+ * single sentence ending in a question mark and the paragraph before it also ends in one, the last paragraph is dropped.
+ * Anything else is returned untouched (lists, a question in the middle of a paragraph, a single paragraph).
+ * Used for replies only: a wrap-up or a weekly reflection may legitimately end differently.
+ * @param {string} text a reply already passed through cleanReply
+ * @returns {string}
+ */
+export function dropSecondQuestion(text) {
+  if (typeof text !== 'string') return text;
+  const p = lastParagraph(text);
+  if (!p) return text;
+  const tail = p.tail.trim();
+  if (!QUESTION_END.test(p.prev.trim()) || !QUESTION_END.test(tail) || !isLoneSentence(tail)) return text;
+  return text.slice(0, p.cut).trimEnd();
+}
+
+/**
+ * How much of the reply streamed so far may be shown. A paragraph that follows a question might be the second one, which is
+ * dropped at the end, so it is held back until it is clear that it will stay (it grows past one sentence, becomes a list)
+ * or the reply is over. The live bubble then never shows text that the saved message does not have.
+ */
+function streamableLength(raw) {
+  // Only the last two paragraphs matter, so a long reply is looked at through a window: this runs on every chunk.
+  const base = Math.max(0, raw.length - STREAM_WINDOW);
+  const view = base > 0 ? raw.slice(base) : raw;
+  const trimmed = view.trimEnd();
+  if (view.length > trimmed.length && view.slice(trimmed.length).includes('\n') && QUESTION_END.test(trimmed)) return base + trimmed.length;
+  const p = lastParagraph(view);
+  const tail = p ? p.tail.trim() : '';
+  if (p && tail !== '' && QUESTION_END.test(p.prev.trim()) && isLoneSentence(tail)) return base + p.cut;
+  return raw.length;
+}
+
+/**
+ * Forwards a reply's text as it arrives, holding back a paragraph that may still be dropped by dropSecondQuestion.
+ * `finish(true)` sends whatever is held (the reply is kept whole, or it ended some other way); `finish(false)` discards it.
+ * @param {(text: string) => void} send
+ */
+function createReplyStream(send) {
+  let raw = '';
+  let sent = 0;
+  const flushTo = (end) => {
+    if (end <= sent) return;
+    send(raw.slice(sent, end));
+    sent = end;
+  };
+  return {
+    push(text) {
+      raw += text;
+      flushTo(streamableLength(raw));
+    },
+    finish(keepHeld) {
+      if (keepHeld) flushTo(raw.length);
     },
   };
 }
@@ -144,7 +228,7 @@ export function createGenerationService({ db, ai, config, generations, log }) {
 
   /** Save partial assistant text as a "stopped" message. Returns it, or null if there is nothing worth saving. */
   function savePartial(entryId, rawText, meta) {
-    const text = cleanReply(rawText).slice(0, MAX_REPLY_CHARS);
+    const text = dropSecondQuestion(cleanReply(rawText)).slice(0, MAX_REPLY_CHARS);
     if (!text) return null;
     try {
       return db.messages.add(entryId, { role: 'assistant', content: text, meta: { ...meta, stopped: true } });
@@ -278,14 +362,18 @@ export function createGenerationService({ db, ai, config, generations, log }) {
         lock,
         async run(sse, signal) {
           if (safety) sse.send('notice', { kind: 'safety', text: safety.content, message: safety });
-          const acc = await collectStream(provider, { ...request, signal }, (text) => sse.send('delta', { text }));
+          const live = createReplyStream((text) => sse.send('delta', { text }));
+          const acc = await collectStream(provider, { ...request, signal }, live.push);
           const outcome = outcomeOf(acc, signal);
+          const cleaned = cleanReply(acc.text);
+          const tidy = dropSecondQuestion(cleaned);
+          live.finish(tidy === cleaned); // a dropped second question is never streamed; everything else is, held text included
           if (outcome !== 'ok') {
             savePartial(entry.id, acc.text, meta);
             if (outcome === 'failed') reportFailure(sse, acc.error, 'Reply');
             return;
           }
-          const text = cleanReply(acc.text).slice(0, MAX_REPLY_CHARS);
+          const text = tidy.slice(0, MAX_REPLY_CHARS);
           if (!text) {
             sse.send('error', emptyReplyError('reply'));
             return;

@@ -311,11 +311,11 @@ export function createOpenAIProvider(rawCfg, opts = {}) {
     return h;
   }
 
-  const newScope = (signal, url, firstByteMs) => createScope({
+  const newScope = (signal, url, firstByteMs, fixedWait = cfg.timeoutCapped === true) => createScope({
     signal,
     firstByteMs,
     idleMs,
-    ctx: { provider: id, secrets, url },
+    ctx: { provider: id, secrets, url, fixedWait },
   });
 
   const errorCtx = (url) => ({ provider: id, secrets, model: cfg.model, url, hasKey: Boolean(cfg.apiKey) });
@@ -490,7 +490,7 @@ export function createOpenAIProvider(rawCfg, opts = {}) {
   async function listModels({ signal } = {}) {
     const base = resolveBase();
     const url = `${base}/models`;
-    const scope = newScope(signal, url, Math.min(cfg.timeoutMs, LIST_TIMEOUT_MS));
+    const scope = newScope(signal, url, Math.min(cfg.timeoutMs, LIST_TIMEOUT_MS), cfg.timeoutCapped === true || cfg.timeoutMs > LIST_TIMEOUT_MS);
     try {
       const { response } = await sendWithPolicy({
         fetchFn,

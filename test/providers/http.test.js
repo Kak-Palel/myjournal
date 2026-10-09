@@ -248,6 +248,29 @@ test('first-byte timeout: the server never answers -> ProviderError timeout, not
   });
 });
 
+test('a timeout hint only says "raise the timeout" when raising it would help', async () => {
+  const expire = async (ctx) => {
+    const scope = createScope({ firstByteMs: 30, ctx });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      return scope.fail(new Error('aborted'));
+    } finally {
+      scope.close(true);
+    }
+  };
+  // a reply, or a check that waits as long as the setting says: raising it helps
+  for (const provider of ['openai', 'gemini']) assert.match((await expire({ ...CTX, provider })).hint, /raise the timeout in Settings/);
+  assert.match((await expire({ ...CTX, provider: 'local' })).hint, /Raise the timeout in Settings \(Settings > General\)/);
+  // Test connection (90 s) and Load models (20 s) wait a fixed time: the setting cannot change it
+  const cloud = await expire({ ...CTX, provider: 'gemini', fixedWait: true });
+  assert.equal(cloud.code, 'timeout');
+  assert.match(cloud.hint, /waits at most \d+ seconds?, whatever the timeout in Settings says\. The service may be busy: try again in a moment\./);
+  assert.doesNotMatch(cloud.hint, /raise/i);
+  const local = await expire({ ...CTX, provider: 'local', fixedWait: true });
+  assert.match(local.hint, /waits at most \d+ seconds?, whatever the timeout in Settings says\. Make sure the model server is running/);
+  assert.doesNotMatch(local.hint, /raise/i);
+});
+
 test('first-byte timeout also covers headers that arrive but a body that never starts', async () => {
   await withTimerCheck(assert, async () => {
     await withServer((req, res) => { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.flushHeaders(); }, async (url) => {

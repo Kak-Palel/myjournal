@@ -7,6 +7,7 @@ import { createMemoryList } from '../components/memory-list.js';
 import { MAX_MEMORY_CHARS, countLabel, validateMemoryText, switchState } from '../components/memory-logic.js';
 import { fieldRow, switchControl, textareaWithCounter, notice, withBusy } from '../components/settings-ui.js';
 import { PRIVATE_MEMORY_TITLE, PRIVATE_MEMORY_TEXT } from '../components/privacy-copy.js';
+import { AUTO_EXTRACT_LABEL, smallModelWarning } from '../components/small-model-note.js';
 
 const isAbort = (err) => Boolean(err) && err.name === 'AbortError';
 
@@ -34,6 +35,7 @@ export default async function memoryView(ctx) {
   const mem = () => app.settings.memory;
   const statusEl = h('span', { class: 'chip memory-count', role: 'status' });
   const offBanner = h('div', { class: 'memory-off', hidden: true });
+  const aiNote = h('div', { class: 'memory-ai-note', hidden: true });
   let saving = false;
 
   function makeSwitch(key, label, hint) {
@@ -59,7 +61,7 @@ export default async function memoryView(ctx) {
 
   const switches = {
     enabled: makeSwitch('enabled', 'Remember things about me', 'Turn off to stop saving and using memories. Existing ones are kept, just not used.'),
-    autoExtract: makeSwitch('autoExtract', 'Suggest memories when I wrap up an entry', 'After you wrap up, your companion may save up to three short facts. You can delete any of them below.'),
+    autoExtract: makeSwitch('autoExtract', AUTO_EXTRACT_LABEL, 'After you wrap up, your companion may save up to three short facts. You can delete any of them below.'),
     useRelatedEntries: makeSwitch('useRelatedEntries', 'Recall related past entries', 'When replying, your companion may look up a few older entries on the same topic so it can follow your thread.'),
   };
 
@@ -76,6 +78,26 @@ export default async function memoryView(ctx) {
       children: [h('strong', null, 'Memory is off.'), h('p', null, 'Nothing new is remembered and your memories are not sent to the AI. The ones below are kept until you delete them.')],
     }) : null);
   }
+
+  /** Memory only does anything through an AI companion; with none switched on or set up, say so (the switches still save). */
+  function paintAiNote() {
+    const ready = app.aiReady();
+    aiNote.hidden = ready;
+    if (ready) { mount(aiNote); return; }
+    const ai = app.settings && app.settings.ai;
+    const off = Boolean(ai) && !ai.enabled;
+    mount(aiNote, notice({
+      tone: 'info', role: 'status',
+      children: [
+        h('strong', null, off ? 'The AI companion is switched off' : 'No AI companion is set up'),
+        h('p', { class: 'muted' }, 'Memory is used by the AI companion, so nothing is suggested or sent while there is none. You can still add facts yourself below; they are used once a companion is on.'),
+        h('a', { class: 'btn btn-sm', href: off ? '#/settings?tab=general' : '#/settings' }, off ? 'Turn AI on' : 'Set up AI'),
+      ],
+    }));
+  }
+
+  // Small local models write poor memory notes: say so right under the switch that creates them.
+  const smallModel = smallModelWarning(app, { signal });
 
   /* -------------------------------------------------------------- add form */
   const addField = textareaWithCounter({
@@ -116,6 +138,7 @@ export default async function memoryView(ctx) {
     signal,
     focusAdd: () => addField.textarea.focus(),
     onChange: () => updateCount(),
+    aiReady: () => app.aiReady(),
   });
   list.set(memories);
 
@@ -156,17 +179,18 @@ export default async function memoryView(ctx) {
     h('header', { class: 'page-header' },
       h('div', null, h('h1', null, 'Memory'), h('p', { class: 'page-sub' }, 'The short facts your companion remembers about you.')),
       statusEl),
+    aiNote,
     h('section', { class: 'card memory-explainer', 'aria-labelledby': 'memory-explainer-title' },
       h('h2', { class: 'memory-card-title', id: 'memory-explainer-title' }, 'How memory works'),
       h('ul', { class: 'memory-points' },
-        point('bookmark', 'A few words each', 'Things like "Has a younger sister called Maya" or "Works night shifts". Never whole entries.'),
+        point('bookmark', 'A few words each', 'Things like “Has a younger sister called Maya” or “Works night shifts”. Never whole entries.'),
         point('sparkles', 'Used when your companion replies', 'The relevant ones are added to the message sent to your AI model, so it can be personal. Nothing else is stored anywhere but this computer.'),
         point('lock', PRIVATE_MEMORY_TITLE, PRIVATE_MEMORY_TEXT),
         point('shield', 'You are in charge', 'Edit, pin, or delete any memory at any time. Pinned ones are always at the top.'))),
     h('section', { class: 'card memory-switches', 'aria-labelledby': 'memory-switches-title' },
       h('h2', { class: 'memory-card-title', id: 'memory-switches-title' }, 'Settings'),
       offBanner,
-      h('div', { class: 'stack' }, switches.enabled.el, switches.autoExtract.el, switches.useRelatedEntries.el)),
+      h('div', { class: 'stack' }, switches.enabled.el, switches.autoExtract.el, smallModel.el, switches.useRelatedEntries.el)),
     h('section', { class: 'card memory-add-card' }, addForm),
     h('section', { class: 'card memory-list-card', 'aria-labelledby': 'memory-list-title' },
       h('div', { class: 'memory-list-head' },
@@ -175,7 +199,8 @@ export default async function memoryView(ctx) {
       list.el)));
 
   paintSwitches();
+  paintAiNote();
   updateCount();
-  const off = app.on('settings', () => { if (!saving) paintSwitches(); });
+  const off = app.on('settings', () => { paintAiNote(); list.refresh(); if (!saving) paintSwitches(); });
   return () => off();
 }

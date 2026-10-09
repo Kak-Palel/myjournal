@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { seedSampleJournal } from '../../scripts/demo.js';
+import { seedSampleJournal } from '../../scripts/demo-lib.js';
 import { LIVE_MODELS, createMockGemini } from '../mocks/mock-gemini.js';
 import { createMockOpenAI } from '../mocks/mock-openai.js';
 import { startApp } from '../server/helpers.js';

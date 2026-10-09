@@ -5,11 +5,50 @@ import net from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { startDemo } from '../../scripts/demo.js';
+import { openDb } from '../../src/db/index.js';
+import { buildWrapUpMessages } from '../../src/journal/context.js';
+import { computeOverview } from '../../src/journal/insights.js';
+import { respond } from '../mocks/mock-responder.js';
+import { defaultSettings } from '../../src/settings.js';
+import { nudgeState } from '../../public/js/components/today-logic.js';
+import { seedSampleJournal, startDemo } from '../../scripts/demo-lib.js';
 import { rawRequest, sse } from './helpers.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CRASH_LATER = fileURLToPath(new URL('./fixtures/crash-later.mjs', import.meta.url));
+
+describe('seedSampleJournal does not depend on the time of day', () => {
+  // Regression: the sample report was "7 days ago at 09:00", still under 7 days old before 09:00, so the weekly nudge never showed for a
+  // demo (and the browser tests) started between midnight and 09:00; and the browser tests assume where a plain entry written 28
+  // hours ago sorts among the samples.
+  const pad = (n) => String(n).padStart(2, '0');
+  const dateOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+  it('at every half hour of the day: the weekly nudge is due, the streak is alive and the newest entry is last night\'s', () => {
+    for (let minutes = 0; minutes < 24 * 60; minutes += 30) {
+      const now = new Date(2026, 9, 9, Math.floor(minutes / 60), minutes % 60);
+      const at = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      const db = openDb({ file: ':memory:' });
+      try {
+        seedSampleJournal(db, now);
+        const today = dateOf(now);
+        const overview = computeOverview({ entries: db.entries.rowsForInsights({}), today, days: 90 });
+        const nudge = nudgeState({ calendar: overview.calendar, reports: db.reports.list(), today, now: now.getTime() });
+        assert.equal(nudge.show, true, `${at}: the weekly reflection nudge shows (${nudge.count} entries this week)`);
+        assert.ok(overview.streak.current >= 1, `${at}: a streak is running`);
+        const byTitle = Object.fromEntries(db.entries.list({ limit: 50 }).map((e) => [e.title, e]));
+        const firstTitle = db.entries.list({ limit: 1 })[0].title;
+        assert.equal(firstTitle, 'A slow day with Miso', `${at}: newest first`);
+        const plain = now.getTime() - 28 * 3600_000;
+        assert.ok(byTitle['A slow day with Miso'].createdAt > plain, `${at}: Miso is newer than a plain entry from 28 hours ago`);
+        assert.ok(byTitle['Long run in the rain'].createdAt < plain, `${at}: and the long run is older`);
+        for (const e of db.entries.list({ limit: 50 })) assert.ok(e.createdAt <= now.getTime(), `${at}: "${e.title}" is not in the future`);
+      } finally {
+        db.close();
+      }
+    }
+  });
+});
 
 describe('scripts/demo.js', () => {
   it('boots the real app with sample data and working pretend models', async () => {
@@ -189,6 +228,25 @@ describe('scripts/demo.js', () => {
       process_.child.kill('SIGTERM');
       await process_.exit;
       process_.child.kill('SIGKILL');
+    }
+  });
+});
+
+describe('the pretend wrap-up reflection of the demo', () => {
+  // Regression: the closing cue ("... Write 3 to 5 sentences.") is a user turn of its own after the companion's reply, and the
+  // canned reflection quoted it as if the person had written it ("ending on “Write 3 to 5 sentences”").
+  it('quotes only what the person wrote, never the instruction the app sends', () => {
+    const turn = (role, content, i) => ({ id: String(i), seq: i, role, content, meta: {} });
+    const conversations = [
+      [turn('user', 'I wrote a lot today and made miso soup.', 0)],
+      [turn('user', 'I wrote a lot today and made miso soup.', 0), turn('assistant', 'What did you write about?', 1)],
+      [turn('user', 'I wrote a lot today.', 0), turn('assistant', 'What about?', 1), turn('user', 'My novel. Chapter three is hard.', 2)],
+    ];
+    for (const messages of conversations) {
+      const built = buildWrapUpMessages({ settings: defaultSettings(), entry: { id: 'e', title: '', date: '2026-10-09' }, messages, memories: [], related: [], now: new Date('2026-10-09T10:00:00Z'), providerId: 'local' });
+      const text = respond(built.messages);
+      assert.doesNotMatch(text, /sentences|closing reflection|speaking as my companion|That is all for now/i, text);
+      assert.match(text, /wrote|novel|miso|chapter/i, 'it still reflects the entry');
     }
   });
 });

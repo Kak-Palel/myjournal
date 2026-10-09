@@ -13,16 +13,57 @@ const MAX_TERM_LENGTH = 64;
 const MAX_HIGHLIGHT_TEXT = 4000;
 const MAX_MATCHES = 200;
 
+const TITLE_FALLBACK_CHARS = 60;
+
+/**
+ * Cut `text` (one line) to at most `max` code points at a word boundary; `rest` is what was left out, starting at the next word.
+ * A text that already fits is returned whole with no rest.
+ * @returns {{ head: string, rest: string }}
+ */
+function cutAtWord(text, max) {
+  const chars = Array.from(text);
+  if (chars.length <= max) return { head: text, rest: '' };
+  const budget = max - 1; // room for the ellipsis the caller adds
+  const slice = chars.slice(0, budget).join('');
+  const space = slice.lastIndexOf(' ');
+  const cut = space >= Math.floor(budget * 0.4) && chars[budget] !== ' ' ? space : slice.length;
+  return { head: slice.slice(0, cut).trimEnd(), rest: text.slice(cut).trimStart() };
+}
+
 /** Title to show for an entry: its title, else the start of what was written, else a placeholder. */
 export function entryTitle(entry) {
   const title = String((entry && entry.title) || '').trim();
   if (title) return title;
   const preview = String((entry && entry.preview) || '').replace(/\s+/g, ' ').trim();
   if (preview) {
-    const chars = Array.from(preview);
-    return chars.length > 60 ? `${chars.slice(0, 57).join('').trimEnd()}…` : preview;
+    const { head, rest } = cutAtWord(preview, TITLE_FALLBACK_CHARS);
+    return rest ? `${head}…` : head;
   }
   return 'Untitled entry';
+}
+
+/**
+ * The two lines of a history card: the title and the text under it.
+ * An entry without a title uses the start of what was written as its title, so the text under it must not say the same words
+ * again: it continues where the title stopped (and is left out when the title already shows everything there is).
+ * @returns {{ title: string, excerpt: string }}
+ */
+export function cardTexts(entry) {
+  const own = String((entry && entry.title) || '').trim();
+  const preview = String((entry && entry.preview) || '').replace(/\s+/g, ' ').trim();
+  const excerpt = previewText(entry);
+  if (own || !preview) return { title: entryTitle(entry), excerpt };
+  const { head, rest } = cutAtWord(preview, TITLE_FALLBACK_CHARS);
+  const title = rest ? `${head}…` : head;
+  const snippet = String((entry && entry.snippet) || '').replace(/\s+/g, ' ').trim();
+  if (snippet) {
+    // a search excerpt shows the part that matched; it is redundant only when that part is already in the title
+    const bare = snippet.replace(/^…|…$/g, '').trim().toLowerCase();
+    return { title, excerpt: bare && head.toLowerCase().includes(bare) ? '' : excerpt };
+  }
+  if (!rest) return { title, excerpt: '' };
+  // the API cuts a long preview without marking it (see previewText), so a cut that stops mid-sentence gets its ellipsis here too
+  return { title, excerpt: preview.length >= 150 && !/[.!?…"”')\]]$/.test(rest) ? `${rest}…` : rest };
 }
 
 /**
@@ -52,22 +93,42 @@ export function monthStart(key) {
   return /^\d{4}-\d{2}$/.test(key) ? `${key}-01` : '';
 }
 
+/** Newest first: by the entry's date, then by when it was written, then by id (so the order never depends on arrival order). */
+function newerFirst(a, b) {
+  const da = typeof a.date === 'string' ? a.date : '';
+  const db = typeof b.date === 'string' ? b.date : '';
+  if (da !== db) return da < db ? 1 : -1;
+  const ca = Number.isFinite(a.createdAt) ? a.createdAt : 0;
+  const cb = Number.isFinite(b.createdAt) ? b.createdAt : 0;
+  if (ca !== cb) return ca < cb ? 1 : -1;
+  return String(a.id) < String(b.id) ? 1 : String(a.id) > String(b.id) ? -1 : 0;
+}
+
 /**
- * Group consecutive entries that share a month. Order is preserved (the API sorts by creation time,
- * which can differ from `date` after an edit, so entries are never reordered).
- * @param {object[]} entries
- * @param {string|null} [previousKey] month of the entry just above this batch ("Load more"); the first group then has `continues: true`
- * @returns {{ key: string, entries: object[], continues: boolean }[]}
+ * Put `entry` where it belongs in a list of month groups (newest month first, 'unknown' last; inside a month newest first).
+ * The server lists entries by WHEN THEY WERE WRITTEN, but the headings are the entry's own `date`, which the person can edit.
+ * Grouping the cards in arrival order put an entry that was backdated under an older month in the middle of the list and
+ * repeated the heading of the month around it. Placing every card by its date gives each month one heading, whatever the order
+ * the pages arrive in; for entries written on their own day (the usual case) each card simply lands at the end of its group.
+ * @param {{ key: string, entries: object[] }[]} months the groups so far (changed in place)
+ * @param {object} entry
+ * @returns {{ monthIndex: number, entryIndex: number, newMonth: boolean }} where the entry went (indexes after the insert)
  */
-export function groupByMonth(entries, previousKey = null) {
-  const groups = [];
-  for (const entry of entries) {
-    const key = monthKey(entry);
-    const last = groups[groups.length - 1];
-    if (last && last.key === key) last.entries.push(entry);
-    else groups.push({ key, entries: [entry], continues: groups.length === 0 && key === previousKey });
+export function placeInMonths(months, entry) {
+  const key = monthKey(entry);
+  let monthIndex = months.findIndex((m) => m.key === key);
+  const newMonth = monthIndex === -1;
+  if (newMonth) {
+    const rank = (k) => (k === 'unknown' ? '' : k); // 'unknown' sorts as the oldest
+    monthIndex = months.findIndex((m) => rank(m.key) < rank(key));
+    if (monthIndex === -1) monthIndex = months.length;
+    months.splice(monthIndex, 0, { key, entries: [] });
   }
-  return groups;
+  const list = months[monthIndex].entries;
+  let entryIndex = list.length;
+  while (entryIndex > 0 && newerFirst(entry, list[entryIndex - 1]) < 0) entryIndex -= 1;
+  list.splice(entryIndex, 0, entry);
+  return { monthIndex, entryIndex, newMonth };
 }
 
 /* ------------------------------------------------------------------ highlighting */
@@ -175,11 +236,23 @@ export function hasActiveFilters(filters) {
   return Boolean(filters.q.trim() || filters.mood || filters.tag || filters.pinned);
 }
 
-/** `/entries?...` path for the API. Search is a single ranked page, so `before` is ignored with `q`. */
-export function listPath(filters, { before = null, limit = 30 } = {}) {
+/** The server pages a search through its best 500 matches (MAX_SEARCH_DEPTH in routes/entries.js); deeper ones are not offered. */
+export const SEARCH_DEPTH = 500;
+/** A search page holds at most this many entries (MAX_SEARCH_RESULTS in routes/entries.js). */
+export const SEARCH_PAGE_MAX = 50;
+
+/**
+ * `/entries?...` path for the API. A list continues with `before` (the createdAt of the last card); a search is ranked, so it
+ * continues with `offset` (how many of the best matches are already shown) and `before` is ignored.
+ */
+export function listPath(filters, { before = null, offset = 0, limit = 30 } = {}) {
   const p = filtersToParams(filters);
   const searching = Boolean(filters.q.trim());
-  p.set('limit', String(searching ? Math.min(limit, 50) : limit));
-  if (before !== null && before !== undefined && !searching) p.set('before', String(before));
+  p.set('limit', String(searching ? Math.min(limit, SEARCH_PAGE_MAX) : limit));
+  if (searching) {
+    if (offset > 0) p.set('offset', String(offset));
+  } else if (before !== null && before !== undefined) {
+    p.set('before', String(before));
+  }
   return `/entries?${p.toString()}`;
 }

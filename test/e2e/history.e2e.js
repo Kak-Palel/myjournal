@@ -3,7 +3,10 @@
 
 import { describe, journey, test, ui, assert, eventually, seedBulk, seedSampleJournal } from './helpers.js';
 
-const seed = (db) => { seedSampleJournal(db); seedBulk(db, 70); };
+// The plain entries start 28 hours ago: older than "A slow day with Miso" (yesterday 21:12, at most 26.8 h ago) and newer than "Long run in
+// the rain" (the day before at 19:12, at least 28.8 h ago), whatever the time of day. At 30 hours the second card was a sample entry
+// between midnight and 01:00.
+const seed = (db) => { seedSampleJournal(db); seedBulk(db, 70, { startHoursAgo: 28 }); };
 
 /** The entry cards currently listed (every card's title is a link to its entry). */
 const cards = (page) => page.getByRole('main').locator('a[href^="#/entry/"]');
@@ -22,7 +25,7 @@ describe('history', () => {
     const months = await page.getByRole('main').getByRole('heading', { level: 2 }).allTextContents(); // textContent: CSS may upper-case the look
     assert.ok(months.length >= 1);
     for (const m of months) assert.match(m, /^[A-Z][a-z]+ \d{4}$/, `"${m}" is a month heading`);
-    assert.match(await cards(page).first().innerText(), /A slow day with Miso/, 'newest entry first (it was written yesterday evening; the plain ones start 30 hours ago)');
+    assert.match(await cards(page).first().innerText(), /A slow day with Miso/, 'newest entry first (it was written yesterday evening; the plain ones start 28 hours ago)');
     assert.match(await cards(page).nth(1).innerText(), /Bulk entry 001/);
 
     await ui.button(page, 'Load more').click();
@@ -81,6 +84,63 @@ describe('history', () => {
       assert.ok(/Nothing matches|result/.test(text), 'a normal result or empty state, not an error');
     });
     assert.equal(await page.getByRole('alert').count(), 0);
+  }));
+
+  test('a search with more than 30 matches pages with "Load more" and does not call a page "30 results" while more wait', () => journey({ name: 'history-search-paging', seed }, async (j) => {
+    const { page, db } = j;
+    // every plain entry says "ordinary things"
+    const total = db.search('ordinary', { limit: 100, includePrivate: true }).length;
+    assert.ok(total > 60 && total < 100, `the seed has ${total} matches`);
+    await j.goto('/history');
+    const search = page.getByRole('searchbox', { name: 'Search your entries' });
+    await search.fill('ordinary');
+    await page.getByText('Showing the best 30 matches for “ordinary”').waitFor();
+    await eventually(async () => assert.equal(await cards(page).count(), 30));
+    assert.equal(await page.getByText('30 results for').count(), 0, 'a page of a longer list is not "30 results"');
+    // ranked results have no month headings: the card titles (h3) sit under a heading of their own, not straight under the h1
+    await page.getByRole('heading', { name: 'Search results', level: 2 }).waitFor({ state: 'attached' });
+
+    await ui.button(page, 'Load more').click();
+    await page.getByText('Showing the best 60 matches for “ordinary”').waitFor();
+    await eventually(async () => assert.equal(await cards(page).count(), 60));
+    await ui.button(page, 'Load more').click();
+    await page.getByText(`${total} results for “ordinary”`).waitFor();
+    await eventually(async () => assert.equal(await cards(page).count(), total));
+    assert.equal(await ui.button(page, 'Load more').count(), 0, 'the last page ends the list');
+    const hrefs = await cards(page).evaluateAll((els) => els.map((a) => a.getAttribute('href')));
+    assert.equal(new Set(hrefs).size, total, 'no entry twice, none missing');
+  }));
+
+  test('Back to a deep list does not retry for ever when a later page cannot be loaded', () => journey({ name: 'history-restore-fails', seed: (db) => seedBulk(db, 320, { startHoursAgo: 1 }) }, async (j) => {
+    const { page, diag } = j;
+    diag.allowConsole(/Failed to load resource|ERR_FAILED|Failed to fetch/);
+    diag.allowFailedRequests(/net::ERR/);
+    await j.goto('/history');
+    await eventually(async () => assert.equal(await cards(page).count(), 30));
+    for (let want = 60; want <= 270; want += 30) {
+      await ui.button(page, 'Load more').click();
+      await eventually(async () => assert.equal(await cards(page).count(), want), { message: `${want} cards` });
+    }
+    await cards(page).last().click(); // leave from deep in the list
+    await page.waitForURL(/#\/entry\//);
+
+    // every request for the list from now on fails after the first one (a server restart, a 5xx)
+    let listRequests = 0;
+    // exactly the list requests (a glob such as **/api/entries?* also matches /api/entries/<id>, where ? is any one character)
+    await page.route((url) => url.pathname === '/api/entries' && url.searchParams.has('limit'), (route) => {
+      listRequests += 1;
+      if (listRequests === 1) return route.continue();
+      return route.abort('failed');
+    });
+    await page.goBack();
+    await page.waitForURL(/#\/history/);
+    await eventually(async () => assert.ok(await cards(page).count() >= 200, 'the first, successful page is shown'), { message: 'the restored first page', timeout: 30_000 });
+    await page.waitForTimeout(2500);
+    const seen = listRequests;
+    await page.waitForTimeout(1500);
+    assert.ok(seen <= 3, `the restore gave up after ${seen} list requests`);
+    assert.equal(listRequests, seen, 'and it stays quiet');
+    assert.equal(await ui.button(page, 'Load more').count(), 1, 'the person can still press Load more');
   }));
 
   test('filters by mood, pinned and tag; chips on a card filter too; Clear filters resets', () => journey({ name: 'history-filters', seed }, async (j) => {

@@ -110,6 +110,20 @@ describe('settings API', () => {
     });
   });
 
+  it('clamps the first-word timeout to 300 s (nothing longer takes effect), also for a document stored with 600', async () => {
+    await withApp({ ai: false }, async (h) => {
+      const res = await h.put('/api/settings', { ai: { timeoutSec: 600 } });
+      assert.equal(res.status, 200);
+      assert.equal(res.json.ai.timeoutSec, 300);
+      assert.equal(h.db.settings.get().ai.timeoutSec, 300);
+      assert.equal((await h.put('/api/settings', { ai: { timeoutSec: 240 } })).json.ai.timeoutSec, 240);
+      assert.equal((await h.put('/api/settings', { ai: { timeoutSec: 1 } })).json.ai.timeoutSec, 5);
+      // a document an earlier build wrote with 600 is read as 300 by GET as well
+      h.db.handle.prepare("UPDATE settings SET value = json_set(value, '$.ai.timeoutSec', 600) WHERE key = 'app'").run();
+      assert.equal((await h.get('/api/settings')).json.ai.timeoutSec, 300);
+    });
+  });
+
   it('clamps numbers, drops unknown keys and cannot be used for prototype pollution', async () => {
     await withApp({ ai: false }, async (h) => {
       const res = await h.request('PUT', '/api/settings', {

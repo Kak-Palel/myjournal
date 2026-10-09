@@ -99,7 +99,10 @@ export function createAiService({ db, env = process.env, fetch: fetchImpl }) {
       if (overlay.model) saved.model = overlay.model;
       if (overlay.apiKey) saved.apiKey = overlay.apiKey;
       const cfg = resolveProviderConfig(id, settings, env);
-      if (timeoutCapMs) cfg.timeoutMs = Math.min(cfg.timeoutMs, timeoutCapMs);
+      if (timeoutCapMs && cfg.timeoutMs > timeoutCapMs) {
+        cfg.timeoutMs = timeoutCapMs;
+        cfg.timeoutCapped = true; // the wait is no longer the person's setting, so a timeout must not tell them to raise it
+      }
       return { provider: createProvider(id, cfg, providerOpts()), cfg, settings };
     },
 
@@ -107,7 +110,8 @@ export function createAiService({ db, env = process.env, fetch: fetchImpl }) {
     providerRows(settings = loadSettings()) {
       return describeProviders(env).map((row) => {
         const { source } = effectiveApiKey(row.id, settings.ai.providers[row.id].apiKey, env);
-        return { ...row, configured: isProviderConfigured(settings, env, row.id), keySource: source };
+        // keyEnvName names the variable only while the environment is where the key comes from (a saved key wins).
+        return { ...row, configured: isProviderConfigured(settings, env, row.id), keySource: source, keyEnvName: source === 'env' ? row.keyEnvName : '' };
       });
     },
   };

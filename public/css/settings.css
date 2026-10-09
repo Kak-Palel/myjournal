@@ -137,6 +137,15 @@
 }
 .settings-advanced[open] { padding-bottom: 1rem; }
 .settings-advanced[open] > summary { margin-bottom: 0.5rem; }
+/* A flex summary draws no marker of its own, so the section would look like a plain label. Draw a chevron that turns when it opens. */
+.settings-advanced > summary, .settings-quick > summary, .settings-subdetails > summary { list-style: none; }
+.settings-advanced > summary::-webkit-details-marker, .settings-quick > summary::-webkit-details-marker, .settings-subdetails > summary::-webkit-details-marker { display: none; }
+.settings-advanced > summary::after, .settings-quick > summary::after, .settings-subdetails > summary::after {
+  content: ''; flex: none; margin-left: auto; width: 0.5rem; height: 0.5rem; margin-right: 0.25rem;
+  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg); transition: transform 0.15s;
+}
+.settings-advanced[open] > summary::after, .settings-quick[open] > summary::after, .settings-subdetails[open] > summary::after { transform: translateY(2px) rotate(-135deg); }
 
 /* --------------------------------------------------------------- local extras */
 .settings-quick { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); padding: 0 1rem; }
@@ -193,6 +202,7 @@
 .settings-dirty-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
 .settings-summary:not([hidden]) { display: block; }
 .settings-result:empty { display: none; }
+.settings-result { scroll-margin-bottom: 1rem; } /* scrollIntoView stops short of the phone tab bar (html has scroll-padding-bottom) */
 .settings-result-card { transition: opacity 0.15s; }
 .settings-result-card.is-stale { opacity: 0.55; }
 /* Kept outside the dimmed card so the advice stays at full contrast. */

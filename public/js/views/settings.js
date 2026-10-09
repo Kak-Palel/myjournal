@@ -11,7 +11,7 @@ import { attachLocalExtras } from '../components/settings-local.js';
 import { createGeneralPanel } from '../components/settings-general.js';
 import { createDataPanel } from '../components/settings-data.js';
 import { notice } from '../components/settings-ui.js';
-import { SETTINGS_TABS, PROVIDER_IDS, PROVIDER_NAMES, resolveTab, tabHash, setupSteps } from '../components/settings-logic.js';
+import { SETTINGS_TABS, PROVIDER_IDS, PROVIDER_NAMES, resolveTab, tabHash, setupSteps, providerState, wasVerified } from '../components/settings-logic.js';
 
 /** Three-way question when leaving a tab with unsaved edits. Resolves 'save' | 'discard' | 'stay'. */
 function askUnsaved(tabLabel) {
@@ -84,10 +84,13 @@ export default async function settingsView(ctx) {
         // First run with a key the server found in its environment: nothing needs saving, so a connection test that works
         // for what is saved is the last step (the same "You are all set" as after Save).
         onTested: ({ dirty }) => {
+          paintStatus(); // a passing test is what turns "Not tested yet" into "Ready"
+          paintMarkers();
           if (setup && id === setupProvider() && keyFromEnv(id) && !dirty) { setupSaved = true; form.emphasizeTest(false); paintBanner(); }
         },
       });
-      if (id === 'local') attachLocalExtras({ form, info, signal });
+      form.onLoaded(() => { paintStatus(); paintMarkers(); }); // a local server's model list says whether the chosen model is installed
+      if (id === 'local') attachLocalExtras({ form, info, signal, app });
       if (setup && id === setupProvider() && keyFromEnv(id)) form.emphasizeTest(true);
       return form;
     }
@@ -189,8 +192,18 @@ export default async function settingsView(ctx) {
   if (window.navigation) window.navigation.addEventListener('navigate', onNavigate);
 
   /* -------------------------------------------------------------- status */
+  /** How sure we are that the provider in use works (see providerState), or null when none is in use. */
+  function activeState() {
+    const ai = app.settings.ai;
+    if (!ai.enabled || !ai.provider) return null;
+    const entry = panels.get(ai.provider);
+    if (entry && entry.comp.state) return entry.comp.state();
+    return providerState({ ready: app.aiReady(), providerId: ai.provider, verified: wasVerified(ai.provider, ai.providers[ai.provider]), installed: null });
+  }
+
   function paintMarkers() {
-    const active = app.settings.ai.enabled ? app.settings.ai.provider : '';
+    // "In use" is a claim that it works: a provider that is chosen but not ready (or not checked) is only shown in the status bar.
+    const active = app.settings.ai.enabled && activeState() === 'ready' ? app.settings.ai.provider : '';
     for (const id of PROVIDER_IDS) {
       const entry = panels.get(id);
       tabs.setMarker(id, entry && entry.comp.isDirty() ? 'Unsaved' : id === active ? 'In use' : '');
@@ -220,14 +233,21 @@ export default async function settingsView(ctx) {
       body = [h('strong', null, 'No AI provider chosen yet.'), ' Pick a tab below to set one up, or keep journaling without AI.'];
     } else {
       const p = ai.providers[ai.provider];
-      const ready = app.aiReady();
+      const state = activeState();
+      const chip = {
+        ready: () => h('span', { class: 'chip chip-primary' }, icon('check', { size: 14 }), 'Ready'),
+        // A local model name is filled in from the start; nothing has shown yet that the server has it.
+        unchecked: () => h('span', { class: 'chip' }, 'Not tested yet'),
+        missing: () => h('span', { class: 'chip chip-warn' }, 'Model not installed'),
+        needs: () => h('span', { class: 'chip chip-warn' }, ai.provider === 'local' ? 'Choose a model' : 'Needs a key'),
+      }[state]();
       body = [
         h('strong', null, `Using ${PROVIDER_NAMES[ai.provider]}`), p && p.model ? h('span', { class: 'settings-status-model' }, ` - ${p.model}`) : null,
-        ready ? h('span', { class: 'chip chip-primary' }, icon('check', { size: 14 }), 'Ready') : h('span', { class: 'chip chip-warn' }, ai.provider === 'local' ? 'Choose a model' : 'Needs a key'),
+        chip,
         shownId === ai.provider ? null : [' ', goto(ai.provider)],
       ];
     }
-    statusEl.className = `settings-status${ai.enabled && ai.provider && app.aiReady() ? ' is-ready' : ''}`;
+    statusEl.className = `settings-status${activeState() === 'ready' ? ' is-ready' : ''}`;
     mount(statusEl, icon(ai.enabled ? 'sparkles' : 'lock', { size: 18 }), h('div', { class: 'grow' }, body));
   }
 
@@ -247,7 +267,8 @@ export default async function settingsView(ctx) {
       return;
     }
     const fromEnv = keyFromEnv(provider);
-    const steps = setupSteps(provider, { keyFromEnv: fromEnv });
+    const row = providerList.find((p) => p.id === provider);
+    const steps = setupSteps(provider, { keyFromEnv: fromEnv, envName: row && row.keyEnvName });
     mount(bannerEl, notice({
       tone: 'info',
       children: [

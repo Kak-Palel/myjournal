@@ -72,6 +72,17 @@ export function reportPeriod(report, locale) {
   return 'Weekly reflection';
 }
 
+/**
+ * The sentence a screen reader hears when the range or the data changes: "Showing the last 90 days: 1 entry, 1 day written."
+ * @param {object} overview the /insights/overview answer
+ * @param {string} range how the period is named, such as "90 days" or "year"
+ */
+export function announceOverview(overview, range) {
+  if (isEmptyOverview(overview)) return 'No entries yet.';
+  const totals = (overview && overview.totals) || {};
+  return `Showing the last ${range}: ${PLURAL(num(totals.entries), 'entry', 'entries')}, ${PLURAL(num(totals.daysWritten), 'day')} written.`;
+}
+
 /** "Gemini - gemini-flash-lite-latest - 5 entries" from a report's meta. */
 export function reportMeta(report) {
   const meta = (report && report.meta) || {};

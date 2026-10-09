@@ -439,3 +439,31 @@ test('multi-message entries: all user messages are searchable, joined in order',
   assert.deepEqual(db.search('pineapples'), []);
   db.close();
 });
+
+test('search offset pages through the ranked hits: pages join up with no gaps and no repeats', () => {
+  const db = memDb();
+  const made = Array.from({ length: 23 }, (_, i) => entryWith(db, [`my work day number ${i} with some work to do`], { title: `Entry ${i}` }));
+  const everything = ids(db.search('work', { limit: 100 }));
+  assert.equal(everything.length, 23);
+  assert.deepEqual([...everything].sort(), made.map((e) => e.id).sort());
+  const pages = [];
+  for (let offset = 0; offset < 30; offset += 10) pages.push(ids(db.search('work', { limit: 10, offset })));
+  assert.deepEqual(pages.map((p) => p.length), [10, 10, 3]);
+  assert.deepEqual(pages.flat(), everything, 'the same order as one big search');
+  assert.deepEqual(db.search('work', { limit: 10, offset: 23 }), [], 'past the end');
+  assert.deepEqual(ids(db.search('work', { limit: 10, offset: 'abc' })), everything.slice(0, 10), 'junk offsets mean none');
+  assert.deepEqual(ids(db.search('work', { limit: 10, offset: -4 })), everything.slice(0, 10));
+  db.close();
+});
+
+test('search offset also pages the substring stage (CJK) and respects filters', () => {
+  const db = memDb();
+  for (let i = 0; i < 12; i += 1) entryWith(db, [`今日は仕事が忙しかった ${i}`], { title: `Day ${i}`, mood: i % 2 === 0 ? 4 : 2 });
+  const all = ids(db.search('仕事', { limit: 100 }));
+  assert.equal(all.length, 12);
+  assert.deepEqual([...ids(db.search('仕事', { limit: 5, offset: 0 })), ...ids(db.search('仕事', { limit: 5, offset: 5 })), ...ids(db.search('仕事', { limit: 5, offset: 10 }))], all);
+  const happy = ids(db.search('仕事', { limit: 100, mood: 4 }));
+  assert.equal(happy.length, 6);
+  assert.deepEqual([...ids(db.search('仕事', { limit: 4, mood: 4 })), ...ids(db.search('仕事', { limit: 4, offset: 4, mood: 4 }))], happy);
+  db.close();
+});

@@ -13,7 +13,7 @@ const isAbort = (err) => Boolean(err) && err.name === 'AbortError';
  * @param {{ signal: AbortSignal, onChange: (memories: object[]) => void, focusAdd: () => void }} opts
  * @returns {{ el: HTMLElement, set(list: object[]): void, add(memory: object): void, all(): object[] }}
  */
-export function createMemoryList({ signal, onChange, focusAdd }) {
+export function createMemoryList({ signal, onChange, focusAdd, aiReady = () => true }) {
   let memories = [];
   let query = '';
   let editingId = '';
@@ -29,10 +29,11 @@ export function createMemoryList({ signal, onChange, focusAdd }) {
   const filterRow = h('div', { class: 'memory-filter-row', hidden: true }, icon('search', { size: 16 }), filterInput);
   const listEl = h('ul', { class: 'memory-list' });
   const noMatch = h('p', { class: 'muted memory-nomatch', hidden: true });
-  const emptyEl = emptyState({
-    icon: 'bookmark', title: 'Nothing remembered yet',
-    body: 'As you wrap up entries, your companion may suggest short facts to remember, and you decide what stays. You can also add one yourself above.',
-  });
+  // With no AI companion on there is nobody to suggest facts: say what actually happens instead of promising it.
+  const emptyBody = () => (aiReady()
+    ? 'As you wrap up entries, your companion may suggest short facts to remember, and you decide what stays. You can also add one yourself above.'
+    : 'Add a fact about yourself above and it is kept here. It is used once an AI companion is switched on; nothing is suggested until then.');
+  const emptyEl = emptyState({ icon: 'bookmark', title: 'Nothing remembered yet', body: emptyBody() });
   const el = h('div', { class: 'memory-list-wrap' }, filterRow, listEl, noMatch, emptyEl);
 
   /* ------------------------------------------------------------- actions */
@@ -196,6 +197,8 @@ export function createMemoryList({ signal, onChange, focusAdd }) {
     noMatch.textContent = noMatch.hidden ? '' : 'No memory matches that filter.';
     listEl.hidden = shown.length === 0;
     emptyEl.hidden = all.length > 0;
+    const emptyText = emptyEl.querySelector('p');
+    if (emptyText) emptyText.textContent = emptyBody();
     applyFocus();
   }
 
@@ -219,5 +222,7 @@ export function createMemoryList({ signal, onChange, focusAdd }) {
     all: () => memories,
     set(list) { memories = sortMemories(list); editingId = ''; deletingId = ''; drafts.clear(); render(); },
     add(memory) { memories = upsertMemory(memories, memory); render(); },
+    /** Repaint (the empty-state text depends on whether an AI companion is on). */
+    refresh() { render(); },
   };
 }

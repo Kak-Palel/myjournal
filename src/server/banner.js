@@ -17,7 +17,7 @@ export function describeAi(settings, env) {
   if (!enabled) return { state: 'off', text: 'switched off in Settings (plain journal)' };
   if (!PROVIDER_IDS.includes(provider)) {
     const keys = [env.GEMINI_API_KEY || env.GOOGLE_API_KEY ? 'Gemini' : '', env.OPENAI_API_KEY ? 'OpenAI' : ''].filter(Boolean);
-    const found = keys.length > 0 ? ` (found a ${keys.join(' and ')} key in the environment: pick it in Settings)` : '';
+    const found = keys.length > 0 ? ` (found ${/^[AEIOU]/.test(keys[0]) ? 'an' : 'a'} ${keys.join(' and ')} key in the environment: pick it in Settings)` : '';
     return { state: 'none', text: `not chosen yet${found}` };
   }
   const label = LABELS[provider];
@@ -41,7 +41,13 @@ export function formatBanner({ config, url, settings }) {
     `  Your data   ${config.dbFile}   (stays on this computer)`,
     `  AI          ${ai.text}`,
   ];
-  if (config.password) lines.push('  Password    required (set with JOURNAL_PASSWORD)');
+  if (config.password) {
+    lines.push('  Password    required (set with JOURNAL_PASSWORD)');
+    // On any address: a short password is often one that a .env file cut off (an unquoted # starts a comment there).
+    if (config.password.length < 10) {
+      lines.push(`  Your password is short (${config.password.length} character${config.password.length === 1 ? '' : 's'}): use a long passphrase. In a .env file an unquoted # ends the value,`, "  so put a password that contains # or $ in single quotes: JOURNAL_PASSWORD='my pass#word'.");
+    }
+  }
   if (ai.state !== 'ready' && ai.state !== 'off') {
     lines.push(
       '',
@@ -57,7 +63,6 @@ export function formatBanner({ config, url, settings }) {
     lines.push('');
     if (config.password) {
       lines.push(`  Listening on ${config.host}: other computers can reach this journal. The password travels unencrypted over`, '  plain HTTP, so put it behind HTTPS (a reverse proxy) before using it outside a trusted network.');
-      if (config.password.length < 10) lines.push('  Your password is short: use a long passphrase.');
     } else {
       lines.push(`  WARNING: listening on ${config.host} WITHOUT a password (JOURNAL_INSECURE_ALLOW_NO_AUTH is set). Anyone who can`, '  reach this computer can read your journal.');
     }

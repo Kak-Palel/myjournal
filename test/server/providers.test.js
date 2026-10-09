@@ -65,7 +65,7 @@ describe('GET /api/providers', () => {
 
 describe('GET /api/providers: configured and keySource, as documented in ARCHITECTURE section 6', () => {
   // The onboarding view shows "Found GEMINI_API_KEY in your environment" when a row says keySource === 'env'.
-  const ROW_KEYS = ['configured', 'defaultBaseUrl', 'defaultModel', 'description', 'id', 'keySource', 'label', 'needsKey', 'presets', 'privacyNote', 'suggestedModels', 'tagline'];
+  const ROW_KEYS = ['configured', 'defaultBaseUrl', 'defaultModel', 'description', 'id', 'keyEnvName', 'keySource', 'label', 'needsKey', 'presets', 'privacyNote', 'suggestedModels', 'tagline'];
   const byId = (res) => Object.fromEntries(res.json.providers.map((p) => [p.id, p]));
 
   it('every row has exactly the documented fields (keyUrl only for Gemini)', async () => {
@@ -118,6 +118,33 @@ describe('GET /api/providers: configured and keySource, as documented in ARCHITE
     await withApp({ ai: false, env: { GEMINI_API_KEY: '   ', OPENAI_API_KEY: '' } }, async (h) => {
       const rows = byId(await h.get('/api/providers'));
       assert.deepEqual([rows.gemini.keySource, rows.openai.keySource], ['none', 'none']);
+    });
+  });
+
+  it('keyEnvName names the variable that supplies the key (GOOGLE_API_KEY included) and is empty when the key does not come from the environment', async () => {
+    const value = 'google-key-VALUE-0042';
+    await withApp({ ai: false }, async (h) => {
+      const res = await h.get('/api/providers');
+      for (const row of res.json.providers) assert.equal(row.keyEnvName, '', `${row.id}: no key in the environment`);
+    });
+    await withApp({ ai: false, env: { GOOGLE_API_KEY: value } }, async (h) => {
+      const res = await h.get('/api/providers');
+      assert.equal(byId(res).gemini.keyEnvName, 'GOOGLE_API_KEY');
+      assert.equal(byId(res).gemini.keySource, 'env');
+      assert.equal(byId(res).openai.keyEnvName, '');
+      assert.doesNotMatch(res.text, new RegExp(value), 'the name, never the value');
+      // a saved key wins over the environment, so the key no longer comes from it
+      saveSettings(h.db, { ai: { providers: { gemini: { apiKey: 'saved-gemini-key-1111' } } } });
+      const saved = byId(await h.get('/api/providers')).gemini;
+      assert.deepEqual([saved.keySource, saved.keyEnvName], ['settings', '']);
+      saveSettings(h.db, { ai: { providers: { gemini: { apiKey: null } } } });
+      assert.equal(byId(await h.get('/api/providers')).gemini.keyEnvName, 'GOOGLE_API_KEY', 'cleared: the environment applies again');
+    });
+    await withApp({ ai: false, env: { GEMINI_API_KEY: 'first-0001', GOOGLE_API_KEY: 'second-0002', OPENAI_API_KEY: 'sk-open-0003', LOCAL_LLM_API_KEY: 'local-0004' } }, async (h) => {
+      const res = await h.get('/api/providers');
+      const names = Object.fromEntries(res.json.providers.map((p) => [p.id, p.keyEnvName]));
+      assert.deepEqual(names, { gemini: 'GEMINI_API_KEY', openai: 'OPENAI_API_KEY', local: 'LOCAL_LLM_API_KEY' });
+      assert.doesNotMatch(res.text, /first-0001|second-0002|sk-open-0003|local-0004/);
     });
   });
 
@@ -189,7 +216,12 @@ describe('Test connection waits long enough for a cold local model', () => {
       assert.equal(ai.buildWithOverlay('local', {}, { timeoutCapMs: testTimeoutCapMs('local') }).cfg.timeoutMs, 180_000);
       assert.equal(ai.buildWithOverlay('openai', {}, { timeoutCapMs: testTimeoutCapMs('openai') }).cfg.timeoutMs, 90_000);
       assert.equal(ai.buildWithOverlay('gemini', {}, { timeoutCapMs: testTimeoutCapMs('gemini') }).cfg.timeoutMs, 90_000);
-      db.settings.set({ ai: { timeoutSec: 600 } });
+      // the provider is told when the wait is a fixed limit instead of the person's setting (its timeout hint changes)
+      assert.equal(ai.buildWithOverlay('openai', {}, { timeoutCapMs: testTimeoutCapMs('openai') }).cfg.timeoutCapped, true);
+      assert.equal(ai.buildWithOverlay('local', {}, { timeoutCapMs: 20_000 }).cfg.timeoutCapped, true, 'Load models: 20 s whatever the setting');
+      assert.equal(ai.buildWithOverlay('local', {}, { timeoutCapMs: testTimeoutCapMs('local') }).cfg.timeoutCapped, undefined, 'a local test waits as long as the setting says');
+      assert.equal(ai.buildWithOverlay('openai', {}).cfg.timeoutCapped, undefined, 'no cap, no flag');
+      db.settings.set({ ai: { timeoutSec: 600 } }); // what an earlier build allowed: clamped to 300 when read
       assert.equal(ai.buildWithOverlay('local', {}, { timeoutCapMs: testTimeoutCapMs('local') }).cfg.timeoutMs, 300_000, 'never more than Node itself waits for headers');
     } finally {
       db.close();

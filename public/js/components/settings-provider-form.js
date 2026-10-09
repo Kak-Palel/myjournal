@@ -9,8 +9,9 @@ import { h, mount } from '../lib/dom.js';
 import { api, ApiError } from '../lib/api.js';
 import { icon, toast, confirmDialog, inlineCode, stripCode } from '../lib/ui.js';
 import {
-  buildProviderPatch, providerChanges, overlayConfig, connectionKey, mapProviderErrors, keyStatus, filterModels, mergeModelOptions,
+  buildProviderPatch, providerChanges, overlayConfig, connectionKey, mapProviderErrors, keyStatus, filterModels, mergeModelOptions, testingMessage,
   matchPreset, PRESET_HINTS, FALLBACK_PRESETS, nextSteps, hostKind, formatLatency, PROVIDER_NAMES,
+  isModelInstalled, providerState, rememberVerified, wasVerified,
 } from './settings-logic.js';
 import {
   fieldRow, withBusy, notice, commandBlock, externalLink, uid, focusFirstInvalid, clip, handFocus, setActionable,
@@ -198,7 +199,6 @@ export function createProviderForm({ info, app, signal, onChange, onSaved, onTes
       h('p', { class: 'settings-hero-tagline muted' }, info.tagline || '')),
     chipsEl),
   info.description ? h('p', { class: 'settings-desc' }, info.description) : null,
-  privacy,
   keyGuide,
   slots.intro,
   summaryEl,
@@ -209,6 +209,9 @@ export function createProviderForm({ info, app, signal, onChange, onSaved, onTes
     slots.afterModel,
     id === 'local' ? keyRow.el : null,
     advanced),
+  // After the fields and right above the buttons: it is read before anything is sent, and it no longer pushes the API key field
+  // below the fold of a first-run screen (the key was 900 px down on a 1440x900 window, so "paste it below" pointed at nothing).
+  privacy,
   h('div', { class: 'settings-actions' },
     h('div', { class: 'row' }, testBtn, saveBtn, useBtn),
     h('div', { class: 'row settings-actions-state' }, dirtyEl, revertBtn)),
@@ -299,7 +302,7 @@ export function createProviderForm({ info, app, signal, onChange, onSaved, onTes
   }
 
   function paintKeyStatus() {
-    const st = keyStatus(saved(), id);
+    const st = keyStatus(saved(), id, info.keyEnvName);
     keyInput.placeholder = st.placeholder;
     mount(keyStatusEl, icon(st.kind === 'saved' ? 'check' : st.kind === 'env' ? 'info' : 'key', { size: 16 }), st.text);
     keyStatusEl.dataset.kind = st.kind;
@@ -308,10 +311,22 @@ export function createProviderForm({ info, app, signal, onChange, onSaved, onTes
     if (keyGuide) keyGuide.hidden = st.kind === 'env'; // a key found in the environment: nobody needs "how to get a key"
   }
 
+  /** Only a provider that has been seen to work (or has a key) is "In use"; a chosen one that is not ready yet is merely "Selected". */
+  function activeState() {
+    const p = saved();
+    const listIsForSavedAddress = loaded.length > 0 && loadedAddr === String(p.baseUrl || '').trim().replace(/\/+$/, '');
+    return providerState({
+      ready: app.aiReady() && app.settings.ai.provider === id,
+      providerId: id,
+      verified: wasVerified(id, p),
+      installed: id === 'local' && listIsForSavedAddress ? isModelInstalled(p.model, loaded) : null,
+    });
+  }
+
   function paintChips() {
-    const st = keyStatus(saved(), id);
+    const st = keyStatus(saved(), id, info.keyEnvName);
     mount(chipsEl,
-      isActive() ? h('span', { class: 'chip chip-primary' }, icon('check', { size: 14 }), 'In use') : null,
+      isActive() ? (activeState() === 'ready' ? h('span', { class: 'chip chip-primary' }, icon('check', { size: 14 }), 'In use') : h('span', { class: 'chip' }, 'Selected')) : null,
       id === 'local' ? h('span', { class: 'chip' }, 'No key needed') : st.kind !== 'none' ? h('span', { class: 'chip' }, st.kind === 'env' ? 'Key from environment' : 'Key saved') : h('span', { class: 'chip chip-warn' }, 'Needs a key'));
   }
 
@@ -468,6 +483,7 @@ export function createProviderForm({ info, app, signal, onChange, onSaved, onTes
       loadedAddr = address();
       renderDatalist();
       renderModelList();
+      paintChips(); // for the local provider the list tells whether the chosen model is installed
       if (!silent) {
         loadedStatus.hidden = false;
         loadedStatus.textContent = loaded.length ? `Found ${loaded.length} ${loaded.length === 1 ? 'model' : 'models'}.` : 'The server answered but lists no models yet.';
@@ -490,6 +506,16 @@ export function createProviderForm({ info, app, signal, onChange, onSaved, onTes
     mount(loadedStatus, icon('alert', { size: 14 }), ` ${stripCode(message)}`, err && err.hint ? ` ${stripCode(clip(err.hint))}` : '');
   }
 
+  /**
+   * Bring the test result into view. It renders under the buttons, and on a phone (or when the page was scrolled to the buttons)
+   * that is below the visible area or behind the tab bar: the button then looked dead. The page's scroll-padding keeps it
+   * clear of the tab bar.
+   */
+  function revealResult() {
+    const reduce = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    resultEl.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
+  }
+
   function keyMissing() {
     return info.needsKey && !keyInput.value.trim() && !saved().apiKeySet;
   }
@@ -503,13 +529,16 @@ export function createProviderForm({ info, app, signal, onChange, onSaved, onTes
     }
     const ctl = newController();
     const started = connectionKey(values());
-    mount(resultEl, h('div', { class: 'settings-result-card settings-testing', role: 'status' }, h('span', { class: 'spinner spinner-sm', 'aria-hidden': 'true' }), ' Contacting the model...'));
+    mount(resultEl, h('div', { class: 'settings-result-card settings-testing', role: 'status' }, h('span', { class: 'spinner spinner-sm', 'aria-hidden': 'true' }), ` ${testingMessage(id)}`));
+    revealResult();
     try {
       const res = await api.post('/providers/test', { provider: id, config: overlayConfig(values()) }, { signal: ctl.signal });
       renderResult(res, { stale: connectionKey(values()) !== started });
+      revealResult();
     } catch (err) {
       if (isAbort(err)) return;
       renderResult({ ok: false, error: { code: err.code, message: err.message, hint: err.hint }, fromApp: true }, { stale: connectionKey(values()) !== started });
+      revealResult();
     } finally {
       pending.delete(ctl);
     }
@@ -525,8 +554,15 @@ export function createProviderForm({ info, app, signal, onChange, onSaved, onTes
     const staleNote = stale ? h('p', { class: 'muted settings-stale-note' }, 'You changed these settings while the test was running. Test again to check the new ones.') : null;
     if (res && res.ok) {
       const meta = [res.model, formatLatency(res.latencyMs)].filter(Boolean).join(' - ');
-      const follow = stale ? '' : isDirty() ? 'Looks good. Press Save to keep these settings.' : isActive() ? '' : 'Looks good. Press "Use this provider" to start journaling with it.';
-      if (!stale && onTested) onTested({ dirty: isDirty() });
+      // Save keeps the settings but does not switch to this provider; "Use this provider" does both. Only when it is already the
+      // provider in use is Save the right next step.
+      const follow = stale ? '' : isActive() ? (isDirty() ? 'Looks good. Press Save to keep these settings.' : '')
+        : 'Looks good. Press “Use this provider” to start journaling with it (Save only keeps these settings).';
+      if (!stale) {
+        rememberVerified(id, values()); // what was just tested works, so the page may say "Ready" for it
+        paintChips();
+        if (onTested) onTested({ dirty: isDirty() });
+      }
       mount(resultEl, card(notice({
         tone: 'success', role: 'status',
         children: [
@@ -540,11 +576,13 @@ export function createProviderForm({ info, app, signal, onChange, onSaved, onTes
     }
     const err = (res && res.error) || {};
     const steps = res && res.fromApp ? [] : nextSteps(id, err.code, { model: modelInput.value });
+    // For a model the local server lacks, "Things to try" carries the whole advice: showing the server's hint as well said it twice.
+    const hintIsInSteps = id === 'local' && err.code === 'model_not_found' && steps.length > 0;
     mount(resultEl, card(notice({
       tone: 'error', role: 'alert',
       children: [
         h('strong', null, inlineCode(clip(err.message) || 'The connection test failed')),
-        err.hint ? h('p', null, inlineCode(clip(err.hint))) : null,
+        err.hint && !hintIsInSteps ? h('p', null, inlineCode(clip(err.hint))) : null,
         steps.length
           ? h('div', { class: 'settings-steps-box' },
             h('p', { class: 'settings-steps-title' }, 'Things to try'),
@@ -569,6 +607,8 @@ export function createProviderForm({ info, app, signal, onChange, onSaved, onTes
     loadModels,
     getValues: values,
     getLoaded: () => loaded,
+    /** 'needs' | 'missing' | 'unchecked' | 'ready' for this provider as saved (see providerState); meaningful while it is the one in use */
+    state: activeState,
     setModel,
     onValues(fn) { valueListeners.add(fn); },
     onLoaded(fn) { loadedListeners.add(fn); },

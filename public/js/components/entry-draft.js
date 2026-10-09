@@ -43,6 +43,28 @@ export function removeDraft(key, storage = defaultStorage()) {
 }
 
 /**
+ * Remove every draft this browser keeps (for Today and for each entry). Drafts are plain text in localStorage, readable in the
+ * developer tools without the journal password, so Sign out and Delete everything must not leave them behind.
+ * @returns {number} how many were removed
+ */
+export function clearAllDrafts(storage = defaultStorage()) {
+  if (!storage) return 0;
+  let removed = 0;
+  try {
+    const keys = [];
+    for (let i = 0; i < storage.length; i += 1) {
+      const key = storage.key(i);
+      if (typeof key === 'string' && key.startsWith(DRAFT_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) {
+      storage.removeItem(key);
+      removed += 1;
+    }
+  } catch { /* storage went away: nothing more to remove */ }
+  return removed;
+}
+
+/**
  * Debounced saver. `flush()` writes immediately (call it on navigation and page hide) and
  * `clear()` cancels any pending write and deletes the draft.
  * @param {{ key: string, storage?: Storage|null, delay?: number }} opts

@@ -6,7 +6,7 @@ import { icon, skeleton, showError, todayString } from '../lib/ui.js';
 import {
   lineChart, calendarHeatmap, horizontalBars, dataTable, moodTableData, calendarTableData, barsTableData, addDaysYmd,
 } from '../lib/charts.js';
-import { RANGES, normalizeRange, isEmptyOverview, statCards } from '../components/insights-logic.js';
+import { RANGES, normalizeRange, isEmptyOverview, statCards, announceOverview } from '../components/insights-logic.js';
 import { createWeeklyCard } from '../components/insights-weekly.js';
 
 const STORAGE_KEY = 'mj-insights-days';
@@ -210,9 +210,7 @@ export default async function insightsView(ctx) {
       overview = data;
       paintStats();
       paintBody();
-      announce.textContent = isEmptyOverview(overview)
-        ? 'No entries yet.'
-        : `Showing the last ${rangeWords(days)}: ${Number(overview.totals.entries) || 0} entries, ${Number(overview.totals.daysWritten) || 0} days written.`;
+      announce.textContent = announceOverview(overview, rangeWords(days));
     } catch (err) {
       if ((err && err.name === 'AbortError') || mine !== loadToken) return;
       mount(statsHost);

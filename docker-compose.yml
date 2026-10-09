@@ -1,8 +1,10 @@
 # MyJournal with Docker Compose.
 #
 #   1. cp .env.example .env
-#      then set JOURNAL_PASSWORD in it (a long passphrase). Add GEMINI_API_KEY / OPENAI_API_KEY
-#      too if you like; you can also paste keys in the app under Settings instead.
+#      then open .env, delete the "#" in front of JOURNAL_PASSWORD= and put a long passphrase after the "=".
+#      (If the passphrase contains # or $, put it in single quotes: JOURNAL_PASSWORD='my pass#word$1'.
+#      Unquoted, Compose cuts it at the # and expands $name, so the password would silently be shorter.)
+#      Add GEMINI_API_KEY / OPENAI_API_KEY too if you like; you can also paste keys in the app under Settings instead.
 #   2. docker compose up -d --build
 #   3. open http://127.0.0.1:3210 and sign in with that password.
 #
@@ -10,7 +12,8 @@
 #   docker compose --profile ollama up -d --build
 #   -> the "ollama" service starts, the one-shot "ollama-pull" service downloads OLLAMA_MODEL once
 #      (about 2 GB for the default, watch it with: docker compose logs -f ollama-pull),
-#      and in the app you pick "Local model" (Settings > Local model), press Test connection, then Use this provider.
+#      and in the app you pick "Run it locally" on the welcome screen (or Settings > Local model), press Test connection, then Save
+#      (the last button is called "Use this provider" when another provider is the one in use).
 #
 # Stop:                docker compose down        (your journal stays in the "journal-data" volume)
 # Delete EVERYTHING:   docker compose down -v     (this also deletes the journal volume. There is no undo.)

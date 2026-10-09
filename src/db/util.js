@@ -4,7 +4,7 @@
 /**
  * Error raised by the DB layer for problems the caller can act on.
  * `code`: 'invalid' (bad argument; `field` names it), 'not_found', 'conflict', 'schema_too_new',
- * 'open_failed', 'invalid_import'.
+ * 'open_failed', 'bad_file' (not a MyJournal database, or damaged), 'no_fts5' (this Node.js has no full-text search), 'invalid_import'.
  */
 export class DbError extends Error {
   /**

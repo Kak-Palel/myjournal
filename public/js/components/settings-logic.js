@@ -38,7 +38,7 @@ export const LIMITS = Object.freeze({
   temperature: Object.freeze({ min: 0, max: 2 }),
   maxTokens: Object.freeze({ min: 64, max: 8192 }),
   contextBudgetTokens: Object.freeze({ min: 500, max: 32000 }),
-  timeoutSec: Object.freeze({ min: 5, max: 600 }),
+  timeoutSec: Object.freeze({ min: 5, max: 300 }),
 });
 
 /** Step of the creativity slider. */
@@ -76,43 +76,49 @@ export function clampNumber(raw, { min, max }, { integer = false } = {}) {
 /* -------------------------------------------------------------- api keys */
 const ENV_NAMES = { gemini: 'GEMINI_API_KEY', openai: 'OPENAI_API_KEY', local: 'LOCAL_LLM_API_KEY' };
 
-/** Environment variable that can supply a provider's key. */
-export function envKeyName(providerId) {
+/** Environment variable that can supply a provider's key (the first one: the server names the one it really found). */
+export function envKeyName(providerId, named) {
+  // `named` is `keyEnvName` from GET /api/providers: GOOGLE_API_KEY when that is what supplied the Gemini key. It is
+  // only ever shown as text, but it must still look like a variable name.
+  if (typeof named === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(named)) return named;
   return ENV_NAMES[providerId] || 'an environment variable';
 }
 
 /**
  * Providers whose API key the server found in its own environment, from the rows of GET /api/providers
- * (`keySource: 'env'`). Only the variable's name is returned, never anything about the key itself. Providers that
- * need no key (the local model) are left out: an optional LOCAL_LLM_API_KEY is not news to anybody.
- * @param {{ id?: string, needsKey?: boolean, keySource?: string }[]} rows
- * @returns {Record<string, string>} e.g. { gemini: 'GEMINI_API_KEY' }
+ * (`keySource: 'env'`). Only the variable's name is returned, never anything about the key itself: the row's
+ * `keyEnvName` when the server sent one (it knows whether GOOGLE_API_KEY or GEMINI_API_KEY supplied the key), else the
+ * provider's usual variable. Providers that need no key (the local model) are left out: an optional LOCAL_LLM_API_KEY
+ * is not news to anybody.
+ * @param {{ id?: string, needsKey?: boolean, keySource?: string, keyEnvName?: string }[]} rows
+ * @returns {Record<string, string>} e.g. { gemini: 'GOOGLE_API_KEY' }
  */
 export function envKeysFound(rows) {
   const found = {};
   for (const row of Array.isArray(rows) ? rows : []) {
-    if (row && PROVIDER_IDS.includes(row.id) && row.needsKey !== false && row.keySource === 'env') found[row.id] = envKeyName(row.id);
+    if (row && PROVIDER_IDS.includes(row.id) && row.needsKey !== false && row.keySource === 'env') found[row.id] = envKeyName(row.id, row.keyEnvName);
   }
   return found;
 }
 
-/** The badge on a welcome card: "Found GEMINI_API_KEY in your environment". */
-export function envKeyBadgeText(providerId) {
-  return `Found ${envKeyName(providerId)} in your environment`;
+/** The badge on a welcome card: "Found GEMINI_API_KEY in your environment" (`named`: the variable the server found). */
+export function envKeyBadgeText(providerId, named) {
+  return `Found ${envKeyName(providerId, named)} in your environment`;
 }
 
 /**
  * How to describe the API key situation without ever showing a key.
  * @param {{ apiKeySet?: boolean, apiKeyHint?: string, apiKeySource?: string }} saved public provider settings
  * @param {string} providerId
+ * @param {string} [envName] `keyEnvName` of the provider's catalog row: which variable supplies the key
  * @returns {{ kind: 'saved'|'env'|'none', text: string, placeholder: string, canRemove: boolean }}
  */
-export function keyStatus(saved, providerId) {
+export function keyStatus(saved, providerId, envName) {
   const set = Boolean(saved && saved.apiKeySet);
   const source = saved && saved.apiKeySource;
   const hint = saved && typeof saved.apiKeyHint === 'string' ? saved.apiKeyHint : '';
   if (set && source === 'env') {
-    const name = envKeyName(providerId);
+    const name = envKeyName(providerId, envName);
     return { kind: 'env', text: `Using ${name} from the environment`, placeholder: `Using ${name} - paste a key to override it`, canRemove: false };
   }
   if (set) {
@@ -277,12 +283,53 @@ export function isModelInstalled(model, loaded) {
   });
 }
 
+/* ------------------------------------------------ what the page may claim about the provider in use */
+// app.aiReady() only knows that a provider is chosen and has a key (or, for a local server, a model NAME). It cannot know that
+// the key works or that the local model is installed. These helpers keep the green "Ready" for what has been seen to work in
+// this browser session (a passing Test connection) or, for a local server, what the server's own model list says.
+const verifiedConnections = new Set();
+const connectionId = (providerId, p) => `${providerId}|${String((p && p.baseUrl) || '').trim().replace(/\/+$/, '')}|${String((p && p.model) || '').trim()}`;
+
+/** A Test connection passed for this address and model. */
+export function rememberVerified(providerId, connection) {
+  verifiedConnections.add(connectionId(providerId, connection));
+}
+
+/** Did a Test connection pass for this address and model in this session? */
+export function wasVerified(providerId, connection) {
+  return verifiedConnections.has(connectionId(providerId, connection));
+}
+
+/** For tests. */
+export function forgetVerified() {
+  verifiedConnections.clear();
+}
+
+/**
+ * How sure are we that the chosen provider works?
+ *   'needs'      nothing to use yet (no key, or no model name)
+ *   'missing'    a local server was asked and does not list the model
+ *   'unchecked'  a local model name is set but nobody has checked that the server has it
+ *   'ready'      a key is set (hosted providers), or the local model was seen to work or to be installed
+ * @param {{ ready: boolean, providerId: string, verified?: boolean, installed?: boolean|null }} state `ready`: app.aiReady();
+ *   `installed`: for a local server whose model list was loaded, whether the model is in it (null when not asked)
+ * @returns {'needs'|'missing'|'unchecked'|'ready'}
+ */
+export function providerState({ ready, providerId, verified = false, installed = null }) {
+  if (!ready) return 'needs';
+  if (providerId !== 'local') return 'ready';
+  if (installed === false && !verified) return 'missing';
+  return verified || installed === true ? 'ready' : 'unchecked';
+}
+
+// Same order and honesty as the server's catalog (src/providers/index.js): what we ran says so, what we did not run says that.
 const SMALL_MODELS = {
-  'llama3.2:1b': { size: '1.3 GB', tier: 'For testing', blurb: 'Tiny and quick. Perfect for checking that everything is connected; replies stay basic.' },
-  'qwen2.5:1.5b': { size: '1 GB', tier: 'Basic', blurb: 'Small and multilingual. Fine for short check-ins.' },
-  'gemma2:2b': { size: '1.6 GB', tier: 'Good', blurb: 'Clear, friendly writing for its size.' },
-  'llama3.2:3b': { size: '2 GB', tier: 'Better', blurb: 'Noticeably better follow-up questions. A good default with 8 GB of RAM.' },
-  'smollm2:1.7b': { size: '1.8 GB', tier: 'Basic', blurb: 'Compact and light on older laptops.' },
+  'llama3.2:3b': { size: '2 GB', tier: 'Recommended', blurb: 'Our pick for a pleasant conversation. We could not run a model this size ourselves, so that is a judgement. A good default with 8 GB of RAM.' },
+  'qwen3:1.7b': { size: '1 to 1.5 GB', tier: 'Best measured', blurb: 'The best small model we measured: it keeps your language, asks one clear question and fits on most laptops.' },
+  'llama3.2:1b': { size: '1.3 GB', tier: 'Basic', blurb: 'Tiny and quick. It replies sensibly but stays basic, and its memory notes are often poor.' },
+  'qwen2.5:1.5b': { size: '1 GB', tier: 'Not measured', blurb: 'Small and multilingual. We did not measure it.' },
+  'gemma2:2b': { size: '1.6 GB', tier: 'Not measured', blurb: 'A common choice at this size. We did not measure it.' },
+  'smollm2:1.7b': { size: '1.8 GB', tier: 'Not measured', blurb: 'Compact and light on older laptops. We did not measure it.' },
 };
 
 /** Size / quality / blurb for a suggested local model, falling back to the catalog's own note. */
@@ -424,6 +471,7 @@ export function nextSteps(providerId, code, { model = '' } = {}) {
       case 'network':
       case 'timeout':
         add('Check the base URL for typos, and your internet connection.');
+        add('Behind a proxy? Start MyJournal with NODE_USE_ENV_PROXY=1 and HTTPS_PROXY set.');
         break;
       case 'context_too_long':
         add('Lower the context budget on the General tab.');
@@ -438,8 +486,9 @@ export function nextSteps(providerId, code, { model = '' } = {}) {
         add('MyJournal inside Docker? Use http://host.docker.internal:11434/v1 instead of localhost.');
         break;
       case 'model_not_found':
-        add('The server does not have that model yet. Download it:', `ollama pull ${m}`);
-        add('Or use the Download model button below.');
+        // The message above already says which model; this is the whole advice (the server's hint says the same, so the card hides it).
+        add('Download it from Ollama:', `ollama pull ${m}`);
+        add('Or press Download model below, or pick a model your server already has.');
         break;
       case 'timeout':
         add('The first request after starting loads the model into memory and can take a minute. Try again.');
@@ -575,11 +624,11 @@ export function describeImportResult(result) {
  * The next steps shown on the onboarding banner (`setup=1`). With a key that the server found in its environment there is
  * nothing to paste and nothing to save: one step is left, pressing Test connection.
  * @param {string} providerId
- * @param {{ keyFromEnv?: boolean }} [opts]
+ * @param {{ keyFromEnv?: boolean, envName?: string }} [opts] `envName`: `keyEnvName` of the provider's catalog row
  */
-export function setupSteps(providerId, { keyFromEnv = false } = {}) {
+export function setupSteps(providerId, { keyFromEnv = false, envName } = {}) {
   if (keyFromEnv && providerId !== 'local') {
-    return [`MyJournal found your key in ${envKeyName(providerId)}, so there is nothing to paste. Press Test connection to check it.`];
+    return [`MyJournal found your key in ${envKeyName(providerId, envName)}, so there is nothing to paste. Press Test connection to check it.`];
   }
   if (providerId === 'gemini') {
     return ['Create a free key in Google AI Studio and paste it below.', 'Press Test connection, then Save.'];
@@ -591,6 +640,17 @@ export function setupSteps(providerId, { keyFromEnv = false } = {}) {
     return ['Start Ollama (or your server) and download a model with the quick start below.', 'Press Test connection, then Save.'];
   }
   return ['Choose a provider tab and fill it in.', 'Press Test connection, then Save.'];
+}
+
+/**
+ * What "Test connection" says while it waits. A local model is loaded into memory by the first request after it starts
+ * (and giving up cancels the load), so the test may legitimately take a minute or more; the other providers answer in seconds.
+ * @param {string} providerId
+ */
+export function testingMessage(providerId) {
+  return providerId === 'local'
+    ? 'Contacting the model... The first request after a model starts loads it into memory, which can take a minute. Please wait.'
+    : 'Contacting the model...';
 }
 
 /** Latency like "820 ms" / "1.4 s". */

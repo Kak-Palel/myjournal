@@ -78,7 +78,11 @@ describe('hostile text is only ever text', () => {
 
     // --- editing a message with a payload
     await page.getByRole('button', { name: 'Edit this message' }).first().click();
-    await page.getByRole('textbox', { name: 'Edit your message' }).fill(`${P.img} edited ${P.svg}`);
+    const editor = page.getByRole('textbox', { name: 'Edit your message' });
+    // The editor puts the caret at the end of the text one frame after it opens. fill() selects everything first; if the caret
+    // moved in between, the new text was appended to the old instead of replacing it (the memory step then saw a different entry).
+    await eventually(async () => assert.equal(await editor.evaluate((el) => document.activeElement === el && el.selectionStart === el.value.length), true), { message: 'the editor to be ready' });
+    await editor.fill(`${P.img} edited ${P.svg}`);
     await page.keyboard.press('Control+Enter');
     await ui.mine(page).getByText('edited', { exact: false }).first().waitFor();
     await assertNoInjection(page, 'edited message');

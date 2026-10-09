@@ -131,8 +131,8 @@ const CRISIS_LINE = 'The user may be in real distress right now. Put care first:
  * used in that language (`closingCue`). Measured on llama3.2:1b with Spanish, French and Japanese entries: the English cue
  * kept the reflection in the entry's language in 0 of 8 tries, the cue in the entry's language in 8 of 8. The cue speaks as
  * the user ("write ... to me, addressing me as you"), which is what turns "As I close this entry, I feel..." into a
- * reflection about the user: 13 of 22 reflections from llama3.2:1b and 10 of 22 from qwen3:1.7b were in the wrong voice
- * (the user's, or about "Sam" in the third person) before, 3 of 22 and 1 of 22 after.
+ * reflection about the user: 9 of 22 reflections from llama3.2:1b and 10 of 22 from qwen3:1.7b were in the wrong voice
+ * (the user's, or about "Sam" in the third person; read by hand) before, 0 of 22 and 0 of 22 after.
  */
 export const WRAPUP_CUE = `${LOCALIZED.en.closing} Use the language I have been writing in.`;
 

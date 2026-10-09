@@ -4,7 +4,8 @@ import { api } from '../lib/api.js';
 import { icon, toast, confirmDialog, skeleton } from '../lib/ui.js';
 import { MAX_IMPORT_BYTES, summarizeImport, describeImportResult, formatFileSize, pluralize } from './settings-logic.js';
 import { notice, errorNotice, section, withBusy, uid } from './settings-ui.js';
-import { DATA_SENT_WITH_A_REPLY } from './privacy-copy.js';
+import { DATA_SENT_WITH_A_REPLY, DATA_SENT_WITH_AI_STEPS } from './privacy-copy.js';
+import { clearAllDrafts } from './entry-draft.js';
 
 const isAbort = (err) => Boolean(err) && err.name === 'AbortError';
 const fmt = (n) => (Number.isFinite(Number(n)) ? Number(n).toLocaleString() : '0');
@@ -155,6 +156,7 @@ export function createDataPanel({ app, signal }) {
         return;
       }
       alsoSettings.checked = false;
+      clearAllDrafts(); // unsent text kept by this browser is part of "everything"
       clearImport();
       mount(exportMsg);
       toast('Everything was deleted', { kind: 'success' });
@@ -180,12 +182,13 @@ export function createDataPanel({ app, signal }) {
           if (!isAbort(err)) toast(err.message || 'Could not sign out', { kind: 'error' });
           return;
         }
+        clearAllDrafts(); // the next person at this browser must not find unsent text in it
         app.navigate('/login');
       }),
     }, 'Sign out');
     mount(accessSlot, section({
       title: 'Access',
-      description: 'This journal is protected by a password. Sign out on a shared computer when you are done.',
+      description: 'This journal is protected by a password. Sign out on a shared computer when you are done. Signing out also removes any unsent draft that this browser keeps.',
       children: [h('div', null, btn)],
     }));
   }).catch(() => { /* optional card: no auth info, no card */ });
@@ -206,14 +209,21 @@ export function createDataPanel({ app, signal }) {
     section({
       title: 'Where your data lives',
       children: [h('div', { class: 'stack-sm settings-prose' },
-        h('p', null, 'Your journal is one SQLite file in the data folder of the computer running MyJournal (', h('code', { class: 'code' }, './data'), ' by default; set ', h('code', { class: 'code' }, 'JOURNAL_DATA_DIR'), ' to move it). Back it up by copying that folder while MyJournal is stopped, or use Export.'),
+        h('h3', { class: 'settings-subtitle' }, 'Stored'),
+        h('p', null, 'Your journal is one file, journal.db, in the data folder of the computer running MyJournal. Back it up by copying that folder while MyJournal is stopped, or use Export above.'),
+        h('details', { class: 'settings-subdetails' },
+          h('summary', null, 'Technical details'),
+          h('p', { class: 'muted' }, 'The file is SQLite. The folder is ', h('code', { class: 'code' }, './data'), ' by default; set ', h('code', { class: 'code' }, 'JOURNAL_DATA_DIR'), ' to move it.')),
+        h('h3', { class: 'settings-subtitle' }, 'Sent to the AI'),
         h('p', null, DATA_SENT_WITH_A_REPLY),
-        h('p', null, h('strong', null, 'API keys: '), 'a key you paste in Settings is saved in that same file, unencrypted. If that matters to you, leave the key fields empty and start MyJournal with ', h('code', { class: 'code' }, 'GEMINI_API_KEY'), ', ', h('code', { class: 'code' }, 'OPENAI_API_KEY'), ' or ', h('code', { class: 'code' }, 'LOCAL_LLM_API_KEY'), ' set instead.'))],
+        h('p', null, DATA_SENT_WITH_AI_STEPS),
+        h('h3', { class: 'settings-subtitle' }, 'API keys'),
+        h('p', null, 'A key you paste in Settings is saved in that same file, unencrypted. If that matters to you, leave the key fields empty and start MyJournal with ', h('code', { class: 'code' }, 'GEMINI_API_KEY'), ', ', h('code', { class: 'code' }, 'OPENAI_API_KEY'), ' or ', h('code', { class: 'code' }, 'LOCAL_LLM_API_KEY'), ' set instead.'))],
     }),
     accessSlot,
     section({
       title: 'Delete everything', className: 'settings-danger',
-      description: 'Remove all entries, messages, memories and reports from this computer.',
+      description: 'Remove all entries, messages, memories and reports from this computer, and any unsent drafts this browser keeps.',
       children: [h('div', { class: 'stack' },
         h('label', { class: 'check' }, alsoSettings, h('span', null, 'Also delete my settings and API keys')),
         h('div', null, wipeBtn))],

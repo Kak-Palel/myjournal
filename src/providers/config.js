@@ -40,7 +40,7 @@ const ENV_FALLBACKS = Object.freeze({
 });
 
 const MIN_TIMEOUT_MS = 1_000;
-const MAX_TIMEOUT_MS = 30 * 60 * 1000;
+const MAX_TIMEOUT_MS = 300_000; // Node's fetch stops waiting for response headers after 300 s (SETTINGS_LIMITS.timeoutSec.max)
 
 const text = (value) => (typeof value === 'string' ? value.trim() : '');
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);

@@ -4,7 +4,7 @@
 //   const provider = createProvider('local', cfg);
 //   for await (const ev of provider.stream({ messages, signal })) { ... }
 
-import { effectiveApiKey } from '../env-keys.js';
+import { effectiveApiKey, envKeyVariable } from '../env-keys.js';
 import { PROVIDER_DEFAULTS, PROVIDER_IDS, resolveProviderConfig } from './config.js';
 import { ProviderError, abortError, errorPayload, isAbortError, ERROR_CODES } from './errors.js';
 import { createGeminiProvider } from './gemini.js';
@@ -85,12 +85,17 @@ const CATALOG = [
     description: 'Run a small open model on your own computer with Ollama, llama.cpp or LM Studio. It is free, private and works offline. Small models are less polished than the big cloud ones, but fine for journaling.',
     needsKey: false,
     privacyNote: 'With a server on your own machine, your journal text never leaves it. If you point the address at another computer, that computer sees your text.',
+    // Order and notes follow what we measured on real models (docs/PROVIDERS.md, "How well small models follow the rules"):
+    // qwen3:1.7b is the best small model we ran, 1B is the floor, smollm2:360m is never suggested (plumbing tests only).
+    // llama3.2:3b is the app's default and the recommendation; we could not run it ourselves, hence no "measured" claim.
+    // The last three are common picks we did not measure, and the notes say so.
     suggestedModels: [
-      { id: 'llama3.2:1b', label: 'Llama 3.2 1B', note: '~1.3 GB, good for testing the plumbing' },
-      { id: 'qwen2.5:1.5b', label: 'Qwen 2.5 1.5B', note: 'Small and multilingual' },
-      { id: 'gemma2:2b', label: 'Gemma 2 2B' },
-      { id: 'llama3.2:3b', label: 'Llama 3.2 3B', note: 'Better quality' },
-      { id: 'smollm2:1.7b', label: 'SmolLM2 1.7B' },
+      { id: 'llama3.2:3b', label: 'Llama 3.2 3B', note: 'Recommended (~2 GB)' },
+      { id: 'qwen3:1.7b', label: 'Qwen 3 1.7B', note: 'Best small model we measured' },
+      { id: 'llama3.2:1b', label: 'Llama 3.2 1B', note: 'Basic (~1.3 GB): replies stay simple' },
+      { id: 'qwen2.5:1.5b', label: 'Qwen 2.5 1.5B', note: 'Small and multilingual; not measured by us' },
+      { id: 'gemma2:2b', label: 'Gemma 2 2B', note: 'Not measured by us' },
+      { id: 'smollm2:1.7b', label: 'SmolLM2 1.7B', note: 'Not measured by us' },
     ],
     presets: [
       { id: 'ollama', label: 'Ollama', baseUrl: 'http://localhost:11434/v1' },
@@ -101,8 +106,10 @@ const CATALOG = [
 ];
 
 /**
- * Catalog rows for `GET /api/providers`, without `configured` (the server adds it). `keySource` reflects the
- * environment only: the server overrides it with 'settings' when a key is saved.
+ * Catalog rows for `GET /api/providers`, without `configured` (the server adds it). `keySource` and `keyEnvName`
+ * reflect the environment only: the server overrides keySource with 'settings' (and empties keyEnvName) when a key is
+ * saved. `keyEnvName` is the NAME of the variable that supplies the key (GEMINI_API_KEY or GOOGLE_API_KEY, whichever
+ * is set first), '' when none is set; the value is never part of a row.
  * @param {Record<string, string|undefined>} [env]
  */
 export function describeProviders(env = process.env) {
@@ -113,5 +120,6 @@ export function describeProviders(env = process.env) {
     defaultBaseUrl: PROVIDER_DEFAULTS[row.id].baseUrl,
     defaultModel: PROVIDER_DEFAULTS[row.id].model,
     keySource: effectiveApiKey(row.id, '', env).source,
+    keyEnvName: envKeyVariable(row.id, env),
   }));
 }

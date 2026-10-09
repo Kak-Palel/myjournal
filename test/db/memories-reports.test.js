@@ -200,6 +200,15 @@ test('settings.exists() is false until the first save, false again after a wipe 
   }
 });
 
+test('settings.get clamps a document saved with a timeout above 300 s (earlier builds allowed 600)', () => {
+  const db = memDb();
+  db.handle.prepare("INSERT INTO settings (key, value) VALUES ('app', ?)").run(JSON.stringify({ onboarded: true, ai: { timeoutSec: 600 } }));
+  assert.equal(db.settings.get().ai.timeoutSec, 300);
+  assert.equal(db.settings.set({ ai: { timeoutSec: 450 } }).ai.timeoutSec, 300);
+  assert.equal(db.settings.get().ai.timeoutSec, 300);
+  db.close();
+});
+
 test('settings.set / get round trip with normalisation', () => {
   const db = memDb();
   const { settings } = mergeSettings(db.settings.get(), { onboarded: true, profile: { name: 'Sam' }, ai: { provider: 'local', providers: { openai: { apiKey: 'sk-secretkey-1234' } } } });

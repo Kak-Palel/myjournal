@@ -55,7 +55,10 @@ export function parseTask(messages) {
 
 // The app ends some prompts with a one-line instruction after the person's text (the meta reminder, the closing cue of a
 // wrap-up that ends with the person's own turn, the weekly instruction). It is not something the person wrote.
-const PROMPT_TAIL = /\n\n(?:Now write the four lines \(Title, Summary, Emotions, Tags\) for this entry\.|That is all for now\.|Eso es todo por ahora\.|C'est tout pour l'instant\.|Das war es für heute\.|Por hoje é só\.|Per ora è tutto\.|Dat was het voor nu\.|今日はここまでです。|今天就到这里。|오늘은 여기까지예요\.|Write my weekly reflection now)[^\n]*$/;
+const PROMPT_TAIL_STARTS = "Now write the four lines \\(Title, Summary, Emotions, Tags\\) for this entry\\.|That is all for now\\.|Eso es todo por ahora\\.|C'est tout pour l'instant\\.|Das war es für heute\\.|Por hoje é só\\.|Per ora è tutto\\.|Dat was het voor nu\\.|今日はここまでです。|今天就到这里。|오늘은 여기까지예요\\.|Write my weekly reflection now";
+const PROMPT_TAIL = new RegExp(`\\n\\n(?:${PROMPT_TAIL_STARTS})[^\\n]*$`);
+// A wrap-up ends with the closing cue as a user turn of its own (after the companion's turn): that message is the app's, not the person's.
+const IS_PROMPT_TURN = new RegExp(`^\\s*(?:${PROMPT_TAIL_STARTS})`);
 const withoutTail = (text) => text.replace(PROMPT_TAIL, '');
 
 /** Text of the last user message ('' if none), without the instruction the app appends to it. */
@@ -69,7 +72,10 @@ export function lastUserText(messages) {
 
 /** All user text, oldest first, joined with blank lines. */
 export function allUserText(messages) {
-  return (messages || []).filter((m) => m && m.role === 'user' && typeof m.content === 'string').map((m) => withoutTail(m.content)).join('\n\n');
+  return (messages || [])
+    .filter((m) => m && m.role === 'user' && typeof m.content === 'string' && !IS_PROMPT_TURN.test(m.content))
+    .map((m) => withoutTail(m.content))
+    .join('\n\n');
 }
 
 export function wordCount(text) {

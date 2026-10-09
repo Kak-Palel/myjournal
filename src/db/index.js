@@ -52,6 +52,21 @@ function tryChmod(path, mode) {
   }
 }
 
+const SQLITE_CORRUPT = 11;
+const SQLITE_NOTADB = 26;
+
+/**
+ * The error for a database that would not open. A file that is not SQLite at all ("file is not a database") or is damaged
+ * ("database disk image is malformed") is 'bad_file': the caller can say the folder is fine and the file is the problem.
+ */
+function openError(path, err) {
+  const code = typeof err?.errcode === 'number' ? err.errcode & 0xff : 0;
+  if (code === SQLITE_NOTADB || code === SQLITE_CORRUPT) {
+    return new DbError('bad_file', `The file ${path} is not a readable MyJournal database (${err.message}).`, { cause: err });
+  }
+  return new DbError('open_failed', `Could not open the journal database at ${path}: ${err.message}`, { cause: err });
+}
+
 function configure(handle, inMemory) {
   handle.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
   handle.exec('PRAGMA foreign_keys = ON');
@@ -72,8 +87,8 @@ function configure(handle, inMemory) {
  *   0600. `now`: clock returning epoch milliseconds (tests inject a fake one).
  * @returns {ReturnType<typeof buildDb>} the database handle with the repositories of ARCHITECTURE section 11
  * @throws {DbError} 'schema_too_new' when the file was written by a newer MyJournal (it is left
- *   untouched); 'open_failed' when SQLite cannot open it or it cannot be written (not a database,
- *   read-only file, permissions, ...)
+ *   untouched); 'bad_file' when it is not a MyJournal database or is damaged; 'no_fts5' when this Node.js has no FTS5;
+ *   'open_failed' when SQLite cannot open it or it cannot be written (read-only file, permissions, ...)
  */
 export function openDb({ file, now = Date.now } = {}) {
   if (typeof file !== 'string' || file.trim() === '') {
@@ -102,9 +117,20 @@ export function openDb({ file, now = Date.now } = {}) {
       // ignore
     }
     if (err instanceof DbError) throw err;
-    throw new DbError('open_failed', `Could not open the journal database at ${path}: ${err.message}`, { cause: err });
+    throw openError(path, err);
   }
-  return buildDb(handle, path, now);
+  try {
+    return buildDb(handle, path, now);
+  } catch (err) {
+    // A SQLite file of another program that happens to carry user_version 1 has no `entries` table: say so, not "no such table".
+    try {
+      handle.close();
+    } catch {
+      // ignore
+    }
+    if (err instanceof DbError) throw err;
+    throw new DbError('bad_file', `The file ${path} is not a MyJournal database (${err.message}).`, { cause: err });
+  }
 }
 
 function buildDb(handle, path, now) {
@@ -121,6 +147,22 @@ function buildDb(handle, path, now) {
   // edits), rebuild it once at startup instead of serving wrong search results.
   const entryCount = ctx.scalar('SELECT COUNT(*) FROM entries');
   if (entryCount !== ctx.scalar('SELECT COUNT(*) FROM entry_search')) search.reindexAll();
+
+  /**
+   * Make text that was just deleted unreadable in the files NOW. secure_delete only zeroes the pages in the write-ahead log
+   * and the old words stay in the search index; both reach the main file, and are cleaned up, at the next checkpoint or clean
+   * shutdown. Without this, a deleted entry stays readable in journal.db until then (and in journal.db-wal after a crash).
+   * Best effort, never throws; a no-op outside a file database. Call it after the delete has committed, not inside tx().
+   */
+  function scrub() {
+    for (const step of [() => search.purgeIfStale(), () => handle.exec('PRAGMA wal_checkpoint(TRUNCATE)')]) {
+      try {
+        step();
+      } catch {
+        // the data is already deleted; this is hygiene
+      }
+    }
+  }
 
   let closed = false;
   function close() {
@@ -159,6 +201,7 @@ function buildDb(handle, path, now) {
     importAll: portability.importAll,
     wipe: portability.wipe,
     stats: portability.stats,
+    scrub,
     /** Run `fn` in a transaction (re-entrant; synchronous callbacks only). */
     tx: ctx.tx,
     /** Escape hatch for tests and diagnostics: the underlying DatabaseSync. */

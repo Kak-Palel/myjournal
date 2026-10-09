@@ -111,11 +111,11 @@ export function createGeneralPanel({ app, signal, onChange }) {
   });
   const ctxRow = fieldRow({
     label: 'Context budget (tokens)', input: ctxInput,
-    hint: 'How much of your conversation and memories is sent with each message. Small local models often only have a 2,000 to 4,000 token window in total, so keep this around 1,500 to 2,500 for them. Cloud models can take 8,000 or more.',
+    hint: 'How much of your conversation and memories is sent with each message. The default fits a 4,096-token window. For a 2,048-token window use about 1,500; raise it only after raising the model\'s window (Ollama: OLLAMA_CONTEXT_LENGTH).',
   });
   const timeoutRow = fieldRow({
     label: 'Wait for the first word (seconds)', input: timeoutInput,
-    hint: 'How long to wait before giving up. Local models are slow on the very first request while they load, so give them a minute or two.',
+    hint: `How long to wait before giving up, ${LIMITS.timeoutSec.min} to ${LIMITS.timeoutSec.max} seconds (nothing longer takes effect). Local models are slow on the very first request while they load, so give them a minute or two.`,
   });
   const baseHints = new Map([[tokensRow, tokensRow.input], [ctxRow, ctxRow.input], [timeoutRow, timeoutRow.input]]);
   const tuning = h('details', { class: 'settings-advanced' },
